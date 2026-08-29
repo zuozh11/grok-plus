@@ -40,6 +40,25 @@ for the version of the code present in this tree.
 
 ## Installing the released binary
 
+### grok-plus (Apple Silicon macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/zuozh11/grok-plus/main/install.sh | bash
+grok-plus --version
+```
+
+The installer keeps grok-plus under `~/.local/share/grok-plus`, exposes it as
+`~/.local/bin/grok-plus`, and installs a macOS LaunchAgent that checks this
+repository's latest GitHub Release every six hours. It does not replace or
+modify the official `grok` executable.
+
+Run `grok-plus update` to update immediately, or `grok-plus update --check`
+to check without installing.
+
+---
+
+### Official Grok Build
+
 Prebuilt binaries are published for macOS, Linux, and Windows:
 
 ```sh

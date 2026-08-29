@@ -2487,14 +2487,8 @@ fn build_update_config() -> UpdateConfig {
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
-    if cfg!(debug_assertions) {
-        return false;
-    }
-    if no_auto_update_flag {
-        return false;
-    }
-    !std::env::var_os("GROK_DISABLE_AUTOUPDATER")
-        .is_some_and(|v| env_flag_enabled(&v.to_string_lossy()))
+    let _ = no_auto_update_flag;
+    false
 }
 /// Gate for the stdio agent's background auto-update: only the direct stdio
 /// agent, from the managed install. Other modes update in `run_agent_command`.
@@ -2563,51 +2557,36 @@ async fn run_update_command(
     trigger: auto_update::CliUpdateTrigger,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
-    if json && !check {
-        anyhow::bail!("--json requires --check");
-    }
-    let mut update_config = base_update_config.clone();
-    if check {
-        if version.is_some() {
-            anyhow::bail!("--version cannot be used with --check");
-        }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
-        auto_update::print_update_status(&status, json)?;
-        return Ok(());
-    }
-    if let Some(ref v) = version
-        && semver::Version::parse(v).is_err()
-    {
+    let _ = (json, channel_switch, trigger, base_update_config);
+    let home = std::env::var_os("GROK_PLUS_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/share/grok-plus"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("Could not resolve the grok-plus install directory"))?;
+    let updater = home.join("update");
+    if !updater.is_file() {
         anyhow::bail!(
-            "'{}' is not a valid version. Expected semver like 0.1.150",
-            v
+            "grok-plus updater is not installed. Reinstall with:\n  curl -fsSL https://raw.githubusercontent.com/zuozh11/grok-plus/main/install.sh | bash"
         );
     }
-    let telemetry_cfg = xai_grok_shell::config::load_agent_config_disk_only()
-        .map_err(|e| tracing::warn!("grok update: telemetry init skipped (agent config: {e})"))
-        .ok();
-    if let Some(agent_cfg) = telemetry_cfg {
-        let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
-            &xai_grok_shell::util::grok_home::grok_home(),
-            agent_cfg.grok_com_config.clone(),
-        ));
-        xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
+
+    let mut command = tokio::process::Command::new(updater);
+    if check {
+        command.arg("--check");
     }
-    let result = auto_update::run_update(
-        force_reinstall,
-        version.as_deref(),
-        channel_switch,
-        &mut update_config,
-        trigger,
-    )
-    .await;
-    if let Ok(Some(installed_version)) = &result {
-        signal_leaders_to_relaunch(installed_version).await;
+    if force_reinstall {
+        command.arg("--force");
     }
-    xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
-        .await;
-    result?;
+    if let Some(version) = version {
+        command.args(["--version", &version]);
+    }
+    let status = command.status().await?;
+    if !status.success() {
+        anyhow::bail!("grok-plus update failed with status {status}");
+    }
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that
