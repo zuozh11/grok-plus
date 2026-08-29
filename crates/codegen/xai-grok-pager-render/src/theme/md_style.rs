@@ -147,14 +147,18 @@ fn build_style() -> MarkdownStyle {
     MarkdownStyle {
         heading_inner: heading_inner_styles(heading_colors, heading_mods),
         heading_outer: heading_outer_styles(heading_colors),
-        strong_inner: fg(strong).bold(),
+        strong_inner: if is_grok_plus {
+            fg(strong)
+        } else {
+            fg(strong).bold()
+        },
         strong_outer: Style::new().dimmed().hidden(),
         emphasis_inner: fg(emphasis).italic(),
         emphasis_outer: Style::new().dimmed().hidden(),
         strikethrough_inner: fg(theme.md_text).strikethrough(),
         strikethrough_outer: Style::new().dimmed().hidden(),
         inline_code_inner: if is_grok_plus {
-            fg(theme.md_code).bold()
+            fg(theme.md_code)
         } else {
             fg(theme.md_code).bold()
         },

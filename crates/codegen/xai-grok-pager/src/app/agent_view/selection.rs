@@ -753,6 +753,56 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
     }
 
+    fn remember_persistent_selection_text(&mut self, text: &str) {
+        if let Some(selection) = self.persistent_text_selection {
+            self.persistent_text_selection_text = Some((selection, text.to_owned()));
+        }
+    }
+
+    pub(in crate::app) fn quote_persistent_selection_into_prompt(&mut self) -> bool {
+        let Some(selection) = self.persistent_text_selection else {
+            return false;
+        };
+        let Some((stored_selection, text)) = self.persistent_text_selection_text.as_ref() else {
+            return false;
+        };
+        if *stored_selection != selection || text.is_empty() {
+            return false;
+        }
+
+        let selected_text = text.clone();
+        let stashed_prompt = self.prompt.stash();
+        self.prompt.set_text("");
+        self.pending_response_annotation = Some(super::PendingResponseAnnotation {
+            selected_text,
+            stashed_prompt,
+        });
+        self.set_active_pane(super::AgentPane::Prompt, true);
+        true
+    }
+
+    pub(in crate::app) fn commit_response_annotation(&mut self) -> bool {
+        let Some(pending) = self.pending_response_annotation.take() else {
+            return false;
+        };
+        let comment = self.prompt.text().trim().to_owned();
+        self.prompt.restore(pending.stashed_prompt);
+        if !self.prompt.text().is_empty() {
+            self.prompt.append_text("\n\n");
+        }
+        self.prompt
+            .insert_response_annotation(&pending.selected_text, &comment);
+        true
+    }
+
+    pub(in crate::app) fn cancel_response_annotation(&mut self) -> bool {
+        let Some(pending) = self.pending_response_annotation.take() else {
+            return false;
+        };
+        self.prompt.restore(pending.stashed_prompt);
+        true
+    }
+
     pub(in crate::app) fn finish_text_drag(&mut self) -> bool {
         let drag = self.drag_selection;
         let copied = drag.and_then(|d| self.reconstruct_drag_copy(&d));
@@ -768,6 +818,7 @@ impl AgentView {
             if let Some(d) = drag {
                 self.persist_drag_selection(&d, kind);
             }
+            self.remember_persistent_selection_text(&text);
             self.copy_to_clipboard(&text);
             return true;
         }
@@ -1167,6 +1218,7 @@ impl AgentView {
             kind: SelectionKind::Linear,
         });
         self.selection_created_at = Some(Instant::now());
+        self.remember_persistent_selection_text(&selection.text);
         self.copy_to_clipboard_debounced(&selection.text);
 
         if hit.entry_idx != BTW_OVERLAY_ENTRY_IDX {
@@ -1227,6 +1279,7 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
 
         if !clipboard_text.is_empty() {
+            self.remember_persistent_selection_text(&clipboard_text);
             self.copy_to_clipboard_debounced(&clipboard_text);
         }
 
@@ -1348,6 +1401,7 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
 
         if let Some(text) = clipboard_text.filter(|text| !text.is_empty()) {
+            self.remember_persistent_selection_text(&text);
             self.copy_to_clipboard_debounced(&text);
         }
 
@@ -1400,6 +1454,7 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
 
         if !clipboard_text.is_empty() {
+            self.remember_persistent_selection_text(&clipboard_text);
             self.copy_to_clipboard_debounced(&clipboard_text);
         }
         self.scrollback.set_selected(Some(hit.entry_idx));
@@ -1450,6 +1505,7 @@ impl AgentView {
         self.selection_created_at = Some(Instant::now());
 
         if !clipboard_text.is_empty() {
+            self.remember_persistent_selection_text(&clipboard_text);
             self.copy_to_clipboard_debounced(&clipboard_text);
         }
         self.scrollback.set_selected(Some(hit.entry_idx));

@@ -397,6 +397,16 @@ impl AgentView {
                 if self.hit_sb_view.contains(mouse.column, mouse.row) {
                     return InputOutcome::Action(Action::OpenBlockViewer);
                 }
+                if self
+                    .hit_text_selection_quote
+                    .contains(mouse.column, mouse.row)
+                {
+                    return if self.quote_persistent_selection_into_prompt() {
+                        InputOutcome::Changed
+                    } else {
+                        InputOutcome::Unchanged
+                    };
+                }
                 if self.last_btw_area.area() > 0
                     && self
                         .last_btw_area
@@ -1122,6 +1132,9 @@ impl AgentView {
                 }
                 changed |= self.hit_sb_copy.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_sb_view.update_hover(mouse.column, mouse.row);
+                changed |= self
+                    .hit_text_selection_quote
+                    .update_hover(mouse.column, mouse.row);
                 if let Some(hd_area) = self.history_dropdown_area {
                     let hs_count = self.prompt.history_search.result_count();
                     let has_sb = hs_count > hd_area.height as usize;

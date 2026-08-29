@@ -60,6 +60,64 @@ enum ShortcutsBarContent {
     Hidden,
 }
 impl AgentView {
+    fn render_text_selection_quote_button(&mut self, buf: &mut Buffer, theme: &Theme) {
+        if self.pending_response_annotation.is_some() {
+            self.hit_text_selection_quote.clear();
+            return;
+        }
+        let Some(selection) = self.persistent_text_selection else {
+            self.hit_text_selection_quote.clear();
+            return;
+        };
+        let Some((stored_selection, _)) = self.persistent_text_selection_text.as_ref() else {
+            self.hit_text_selection_quote.clear();
+            return;
+        };
+        if *stored_selection != selection {
+            self.hit_text_selection_quote.clear();
+            return;
+        }
+        let Some(range) = self
+            .last_scrollback_selection_model
+            .ranges
+            .iter()
+            .find(|range| {
+                range.entry_idx == selection.entry_idx && range.range_id == selection.range_id
+            })
+        else {
+            self.hit_text_selection_quote.clear();
+            return;
+        };
+        let Some(line) = range
+            .lines
+            .iter()
+            .find(|line| line.block_line_idx == selection.head.block_line_idx)
+        else {
+            self.hit_text_selection_quote.clear();
+            return;
+        };
+
+        let content = self.last_scrollback_selection_model.content_area;
+        const WIDTH: u16 = 10;
+        if content.width < WIDTH || !content.contains((line.screen_x, line.screen_y).into()) {
+            self.hit_text_selection_quote.clear();
+            return;
+        }
+        let rect = Rect {
+            x: content.x + content.width - WIDTH,
+            y: line.screen_y,
+            width: WIDTH,
+            height: 1,
+        };
+        let style = if self.hit_text_selection_quote.hovered {
+            Style::default().fg(theme.bg_base).bg(theme.accent_user)
+        } else {
+            Style::default().fg(theme.accent_user).bg(theme.bg_light)
+        };
+        buf.set_string(rect.x, rect.y, " Annotate ", style);
+        self.hit_text_selection_quote.set(Some(rect));
+    }
+
     pub(crate) fn update_scrollback_selection_state(
         &mut self,
         model: ResolvedSelectionModel,
@@ -983,11 +1041,14 @@ impl AgentView {
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.plan_mode_pending.unwrap_or(self.plan_mode_active);
         let casual_commenting = self.is_casual_commenting();
+        let response_annotating = self.pending_response_annotation.is_some();
         let prompt_focused = if self.plan_approval_view.is_some() {
             self.plan_approval_view
                 .as_ref()
                 .is_some_and(|pav| pav.focus != PlanApprovalFocus::Preview)
         } else if casual_commenting {
+            true
+        } else if response_annotating {
             true
         } else {
             self.active_pane == AgentPane::Prompt && !overlay_focused
@@ -1003,18 +1064,31 @@ impl AgentView {
             bg: PromptBg::Default,
             accent_color_override: if let Some(c) = self.prompt_input_mode.accent_color(&theme) {
                 Some(c)
+            } else if response_annotating {
+                Some(theme.accent_user)
             } else if effective_plan || casual_commenting {
                 Some(theme.accent_plan)
             } else {
                 None
             },
-            border_color_override: if effective_plan || casual_commenting {
+            border_color_override: if response_annotating {
+                Some(theme.warning)
+            } else if effective_plan || casual_commenting {
                 crate::render::color::blend_color(theme.bg_base, theme.accent_plan, 0.4)
             } else {
                 None
             },
             prefix_override: if let Some(p) = self.prompt_input_mode.prefix_override(&theme) {
                 Some(p)
+            } else if response_annotating {
+                Some((
+                    if crate::glyphs::is_legacy_windows_console() {
+                        "* "
+                    } else {
+                        "● "
+                    },
+                    theme.accent_user,
+                ))
             } else if casual_commenting
                 || self
                     .plan_approval_view
@@ -1038,6 +1112,8 @@ impl AgentView {
                 .placeholder_override(self.multiline_mode)
             {
                 Some(ph)
+            } else if response_annotating {
+                Some("Add an optional comment…")
             } else if casual_commenting
                 || self
                     .plan_approval_view
@@ -1868,6 +1944,7 @@ impl AgentView {
                     buf,
                 );
             }
+            self.render_text_selection_quote_button(buf, &theme);
             agent::render_hook_hover_popup(
                 buf,
                 layout.scrollback,
@@ -2455,6 +2532,13 @@ impl AgentView {
         let commenting_label;
         let theme = Theme::current();
         let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
+        if response_annotating {
+            mode_flags_vec.push(PromptFlag {
+                text: "annotation mode · Enter save · Esc cancel",
+                color: Some(theme.accent_user),
+                bold: false,
+            });
+        }
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()

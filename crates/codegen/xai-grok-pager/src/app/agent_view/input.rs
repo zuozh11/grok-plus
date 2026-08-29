@@ -46,6 +46,7 @@ impl AgentView {
             || self.blocking_card().is_some()
             || self.plan_approval_view.is_some()
             || self.casual_commenting_range.is_some()
+            || self.pending_response_annotation.is_some()
             || self.rewind_state.is_some()
             || self.inline_edit.is_some()
             || self.jump_state.is_some()
@@ -389,6 +390,22 @@ impl AgentView {
         registry: &ActionRegistry,
         prompt_paging: bool,
     ) -> InputOutcome {
+        if self.pending_response_annotation.is_some()
+            && let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+        {
+            if key.code == KeyCode::Esc && key.modifiers.is_empty() {
+                self.cancel_response_annotation();
+                return InputOutcome::Changed;
+            }
+            if key.code == KeyCode::Enter && key.modifiers.is_empty() {
+                return if self.commit_response_annotation() {
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Unchanged
+                };
+            }
+        }
         if self.scrollback_drag_latched() {
             match ev {
                 Event::Mouse(MouseEvent {

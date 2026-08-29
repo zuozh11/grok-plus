@@ -133,6 +133,11 @@ pub(super) fn retire_optimistic_echo(
 /// Must be called after `enqueue_prompt` / `push_back` and before `prompt.set_text("")` (which clears element and image state).
 /// If the last queued entry already has `wire_blocks` (skill injection), images are dropped with a toast instead of merged.
 pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
+    let annotation_wire = agent
+        .session
+        .pending_prompts
+        .back()
+        .and_then(|entry| agent.prompt.response_annotations_wire_text(&entry.text));
     let prompt_state = agent.prompt.stash();
     let (_, images, chip_elements) = prompt_state.into_submission();
 
@@ -141,6 +146,14 @@ pub(super) fn drain_prompt_state_to_last_queued(agent: &mut AgentView) {
     };
 
     entry.chip_elements = chip_elements;
+
+    if let Some(wire_text) = annotation_wire
+        && entry.wire_blocks.is_none()
+    {
+        entry.wire_blocks = Some(vec![acp::ContentBlock::Text(acp::TextContent::new(
+            wire_text,
+        ))]);
+    }
 
     if images.is_empty() {
         return;

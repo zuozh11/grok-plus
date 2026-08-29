@@ -42,6 +42,8 @@ pub const KIND_PASTE: ElementKind = ElementKind(1);
 pub const KIND_FILE_REF: ElementKind = ElementKind(2);
 /// Element kind tag for pasted image chips (`[Image #N]`).
 pub const KIND_IMAGE: ElementKind = ElementKind(3);
+/// Element kind tag for a response annotation containing a selected excerpt and its comment.
+pub const KIND_ANNOTATION: ElementKind = ElementKind(4);
 
 /// Byte size at which a single-line paste is chipped (display only, not an offload threshold).
 const PASTE_CHIP_DISPLAY_BYTES: usize = 10_000;
@@ -2261,6 +2263,89 @@ impl PromptWidget {
         PromptEvent::Edited
     }
 
+    /// Insert a bound response annotation as an always-collapsed element.
+    pub fn insert_response_annotation(
+        &mut self,
+        selected_text: &str,
+        comment: &str,
+    ) -> PromptEvent {
+        if selected_text.is_empty() {
+            return PromptEvent::Ignored;
+        }
+        self.post_insert_image_preview = None;
+        let selected_text = normalize_cr(selected_text);
+        let comment = normalize_cr(comment);
+        let annotation_index = self
+            .textarea
+            .elements()
+            .iter()
+            .filter(|element| element.kind == KIND_ANNOTATION)
+            .count()
+            + 1;
+        let mut content = format!("> {annotation_index}. **Selected text:**\n");
+        for line in selected_text.lines() {
+            content.push_str("> ");
+            content.push_str(line);
+            content.push('\n');
+        }
+        content.push_str(">\n> **User comment:**\n");
+        for line in comment.trim().lines() {
+            content.push_str("> ");
+            content.push_str(line);
+            content.push('\n');
+        }
+        content.push_str(">\n\n");
+        self.textarea.insert_element(
+            &content,
+            KIND_ANNOTATION,
+            Some(chip_line(format!("Annotation {annotation_index}"))),
+        );
+        self.update_file_search_context();
+        PromptEvent::Edited
+    }
+
+    /// Build the model-facing Codex-style annotation payload while preserving
+    /// the original composer text for the local user-message rendering.
+    pub(crate) fn response_annotations_wire_text(&self, source_text: &str) -> Option<String> {
+        let mut elements: Vec<_> = self
+            .textarea
+            .elements()
+            .iter()
+            .filter(|element| element.kind == KIND_ANNOTATION)
+            .collect();
+        if elements.is_empty() {
+            return None;
+        }
+        elements.sort_by_key(|element| element.range.start);
+
+        let mut annotations = Vec::new();
+        let mut message = String::new();
+        let mut cursor = 0;
+        for element in elements {
+            if element.range.end > source_text.len() || element.range.start < cursor {
+                continue;
+            }
+            message.push_str(&source_text[cursor..element.range.start]);
+            let raw = &source_text[element.range.clone()];
+            if let Some((text, annotation)) = parse_response_annotation(raw) {
+                annotations.push(serde_json::json!({
+                    "text": text,
+                    "annotation": annotation,
+                }));
+            }
+            cursor = element.range.end;
+        }
+        message.push_str(&source_text[cursor..]);
+        if annotations.is_empty() {
+            return None;
+        }
+        let annotations = serde_json::to_string(&annotations).ok()?;
+        Some(format!(
+            "# Response annotations:\n<response-annotations>\n{annotations}\n</response-annotations>\n\n## My request:\n{}",
+            message.trim()
+        ))
+    }
+
     // ── Image chip support ──────────────────────────────────────────
 
     /// Maximum number of image chips allowed in a single prompt (v1).
@@ -2689,9 +2774,10 @@ impl PromptWidget {
         &self.textarea
     }
 
-    /// Buffer text of `elem` if it is a paste chip (`KIND_PASTE`).
+    /// Buffer text of `elem` if it is a collapsible text chip.
     fn paste_text(&self, elem: &TextElement) -> Option<&str> {
-        (elem.kind == KIND_PASTE).then(|| &self.textarea.text()[elem.range.clone()])
+        matches!(elem.kind, KIND_PASTE | KIND_ANNOTATION)
+            .then(|| &self.textarea.text()[elem.range.clone()])
     }
 
     /// Check if the cursor is currently on a paste element.
@@ -2714,7 +2800,7 @@ impl PromptWidget {
                 .iter()
                 .find(|e| e.range.end == cursor)
         })?;
-        (elem.kind == KIND_PASTE).then_some(elem)
+        matches!(elem.kind, KIND_PASTE | KIND_ANNOTATION).then_some(elem)
     }
 
     /// Paste element text for the preview overlay.
@@ -2722,8 +2808,23 @@ impl PromptWidget {
     /// Shows the moment a chip is created (cursor right after it) as well as with the cursor on it.
     /// Display-only: Enter handling keeps the strict on-chip match.
     /// So Enter right after a chip keeps its normal behavior (submit or newline) instead of expanding the chip.
-    fn paste_element_for_preview(&self) -> Option<&str> {
-        self.paste_text(self.paste_element_near_cursor()?)
+    fn paste_element_for_preview(&self) -> Option<String> {
+        let element = self.paste_element_near_cursor()?;
+        let text = self.paste_text(element)?;
+        if element.kind == KIND_ANNOTATION {
+            Some(
+                text.lines()
+                    .map(|line| {
+                        line.strip_prefix("> ")
+                            .or_else(|| line.strip_prefix('>'))
+                            .unwrap_or(line)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        } else {
+            Some(text.to_owned())
+        }
     }
 
     /// Expand hint for the paste preview overlay, honest per position.
@@ -2736,17 +2837,29 @@ impl PromptWidget {
         let chord = Style::default()
             .fg(theme.fuzzy_accent)
             .add_modifier(Modifier::BOLD);
+        let annotation_nearby = self
+            .paste_element_near_cursor()
+            .is_some_and(|elem| elem.kind == KIND_ANNOTATION);
         let action = if self.paste_element_at_cursor().is_some() {
             "enter"
+        } else if annotation_nearby {
+            ""
         } else {
             "paste again"
         };
-        Line::from(vec![
-            Span::styled(action, chord),
-            Span::styled(" or ", dim),
-            Span::styled("double-click", chord),
-            Span::styled(" to expand", dim),
-        ])
+        if action.is_empty() {
+            Line::from(vec![
+                Span::styled("double-click", chord),
+                Span::styled(" to expand", dim),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(action, chord),
+                Span::styled(" or ", dim),
+                Span::styled("double-click", chord),
+                Span::styled(" to expand", dim),
+            ])
+        }
     }
 
     /// Inline (expand) element `id` into plain buffer text and refresh the @-completion context.
@@ -2764,7 +2877,7 @@ impl PromptWidget {
         let Some(elem) = self.textarea.element_at_cursor() else {
             return false;
         };
-        if elem.kind != KIND_PASTE {
+        if !matches!(elem.kind, KIND_PASTE | KIND_ANNOTATION) {
             return false;
         }
         let id = elem.id;
@@ -2784,7 +2897,7 @@ impl PromptWidget {
             return None;
         }
         match elem.kind {
-            k if k == KIND_PASTE || k == KIND_FILE_REF => {
+            k if k == KIND_PASTE || k == KIND_ANNOTATION || k == KIND_FILE_REF => {
                 let id = elem.id;
                 self.expand_element(id);
                 Some(ElementInteraction::Inlined)
@@ -3242,7 +3355,7 @@ impl PromptWidget {
                 hint: Some(self.paste_preview_hint(&theme)),
                 ..Default::default()
             };
-            render_preview_overlay(buf, overlay, paste_text, preview_style, config);
+            render_preview_overlay(buf, overlay, &paste_text, preview_style, config);
         }
 
         let mut post_flush_escapes = None;
@@ -3595,6 +3708,26 @@ fn normalize_cr(text: &str) -> String {
         }
     }
     s
+}
+
+fn parse_response_annotation(raw: &str) -> Option<(String, String)> {
+    const COMMENT_MARKER: &str = "\n>\n> **User comment:**\n";
+    let (_, body) = raw.split_once('\n')?;
+    let split = body.rfind(COMMENT_MARKER)?;
+    let selected = unquote_annotation_lines(&body[..split]);
+    let comment = unquote_annotation_lines(&body[split + COMMENT_MARKER.len()..]);
+    Some((selected.trim().to_owned(), comment.trim().to_owned()))
+}
+
+fn unquote_annotation_lines(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.strip_prefix("> ")
+                .or_else(|| line.strip_prefix('>'))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Build the styled display `Line` for a paste element chip.

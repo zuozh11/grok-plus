@@ -20,6 +20,8 @@ impl Theme {
     pub const fn grok_plus() -> Self {
         let mut theme = Self::groknight();
 
+        theme.bg_base = Color::Reset;
+        theme.bg_terminal = Color::Reset;
         theme.md_text = rgb(232, 230, 236); // #e8e6ec
         theme.md_heading_h1 = rgb(0, 204, 164); // #00cca4
         theme.md_heading_h2 = rgb(118, 175, 255); // #76afff
