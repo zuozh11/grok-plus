@@ -108,6 +108,7 @@ mv -f "$UPDATER.tmp" "$UPDATER"
 
 if [ "$install_agent" -eq 1 ]; then
   mkdir -p "$(dirname "$LAUNCH_AGENT")"
+  : > "$HOME_DIR/update.log"
   cat > "$LAUNCH_AGENT" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
