@@ -44,9 +44,21 @@ jobs:
       - name: Install DotSlash
         run: cargo install dotslash --locked
 
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-arm64-cargo-${{ hashFiles('Cargo.lock') }}-${{ inputs.ref || github.sha }}
+          restore-keys: |
+            macos-arm64-cargo-${{ hashFiles('Cargo.lock') }}-
+
       - name: Build
         env:
           GROK_VERSION: ${{ steps.version.outputs.version }}
+          CARGO_INCREMENTAL: "0"
         run: cargo build --release -p xai-grok-pager-bin --bin grok-plus
 
       - name: Package
