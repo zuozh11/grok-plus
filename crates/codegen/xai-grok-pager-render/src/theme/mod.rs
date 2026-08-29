@@ -15,6 +15,7 @@ pub mod color_support;
 pub mod env_appearance;
 mod grokday;
 mod groknight;
+mod grokplus;
 pub mod md_style;
 pub mod osc11;
 mod oscura;
@@ -34,6 +35,7 @@ pub enum ThemeKind {
     TokyoNight = 2,
     RosePineMoon = 3,
     OscuraMidnight = 5,
+    GrokPlus = 6,
     /// Meta-variant: follow system dark/light appearance.
     ///
     /// Never stored in `cache::CURRENT` — resolved to a concrete
@@ -52,6 +54,7 @@ impl ThemeKind {
         ThemeKind::TokyoNight,
         ThemeKind::RosePineMoon,
         ThemeKind::OscuraMidnight,
+        ThemeKind::GrokPlus,
     ];
 
     /// Theme kinds available on the current terminal.
@@ -79,6 +82,7 @@ impl ThemeKind {
             Self::GrokDay => "grokday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
+            Self::GrokPlus => "grok-plus",
             Self::Auto => "auto",
         }
     }
@@ -95,6 +99,7 @@ impl ThemeKind {
             Self::GrokDay => false,
             Self::RosePineMoon => true,
             Self::OscuraMidnight => true,
+            Self::GrokPlus => true,
             // Auto is resolved to a concrete theme before rendering.
             Self::Auto => false,
         }
@@ -113,6 +118,7 @@ impl ThemeKind {
                 Some(Self::RosePineMoon)
             }
             "oscura" | "oscura-midnight" => Some(Self::OscuraMidnight),
+            "grok-plus" | "grokplus" | "plus" => Some(Self::GrokPlus),
             _ => None,
         }
     }
@@ -148,6 +154,7 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
+        "grok-plus" => "Grok Plus",
         other => other,
     }
 }
@@ -274,6 +281,7 @@ impl Theme {
             ThemeKind::GrokDay => Self::grokday(),
             ThemeKind::RosePineMoon => Self::rosepine_moon(),
             ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+            ThemeKind::GrokPlus => Self::grok_plus(),
             // Auto is resolved to a concrete theme before being stored;
             // if reached, fall back to GrokNight.
             ThemeKind::Auto => Self::groknight(),

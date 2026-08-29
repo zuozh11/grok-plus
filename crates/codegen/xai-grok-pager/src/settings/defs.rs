@@ -47,6 +47,11 @@ const THEME_CHOICES: &[EnumChoice] = &[
         description: "Neutral dark with magenta accent.",
     },
     EnumChoice {
+        canonical: "grok-plus",
+        display: "Grok Plus",
+        description: "Codex Plus Markdown colors on Grok Night.",
+    },
+    EnumChoice {
         canonical: "grokday",
         display: "Grok Day",
         description: "Light theme for bright environments.",
@@ -475,6 +480,11 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         canonical: "groknight",
         display: "Grok Night",
         description: "Neutral dark with magenta accent.",
+    },
+    EnumChoice {
+        canonical: "grok-plus",
+        display: "Grok Plus",
+        description: "Codex Plus Markdown colors on Grok Night.",
     },
     EnumChoice {
         canonical: "grokday",

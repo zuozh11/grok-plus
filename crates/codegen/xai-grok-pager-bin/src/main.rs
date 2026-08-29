@@ -1929,6 +1929,11 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     true
 }
 fn main() {
+    if env::var_os("GROK_THEME").is_none() && env::var_os("LC_GROK_THEME").is_none() {
+        // This happens before any worker threads start. Keep the custom binary
+        // on its bundled theme without changing the user's official Grok config.
+        unsafe { env::set_var("GROK_THEME", "grok-plus") };
+    }
     xai_grok_version::set_full_version(env!("VERSION_WITH_COMMIT"));
     xai_grok_telemetry::startup::mark_process_start();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {

@@ -146,6 +146,7 @@ pub fn highlight_line(
 pub fn get_syntect() -> &'static Syntect {
     match crate::theme::Theme::current_kind() {
         ThemeKind::GrokNight
+        | ThemeKind::GrokPlus
         | ThemeKind::RosePineMoon
         | ThemeKind::OscuraMidnight
         | ThemeKind::Auto => SYNTECT_GROKNIGHT

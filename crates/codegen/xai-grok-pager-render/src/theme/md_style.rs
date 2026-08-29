@@ -106,6 +106,26 @@ pub fn style() -> MarkdownStyle {
 
 fn build_style() -> MarkdownStyle {
     let theme = super::Theme::current();
+    let is_grok_plus = super::Theme::current_kind() == super::ThemeKind::GrokPlus;
+    let (strong, emphasis, quote_text, quote_bar, list, rule) = if is_grok_plus {
+        (
+            super::grokplus::MD_STRONG,
+            super::grokplus::MD_EMPHASIS,
+            super::grokplus::MD_QUOTE_TEXT,
+            super::grokplus::MD_QUOTE_BAR,
+            super::grokplus::MD_LIST,
+            super::grokplus::MD_RULE,
+        )
+    } else {
+        (
+            theme.md_text,
+            theme.md_text,
+            theme.md_text,
+            theme.md_muted,
+            theme.md_muted,
+            theme.md_muted,
+        )
+    };
 
     let heading_colors = [
         theme.md_heading_h1,
@@ -127,22 +147,35 @@ fn build_style() -> MarkdownStyle {
     MarkdownStyle {
         heading_inner: heading_inner_styles(heading_colors, heading_mods),
         heading_outer: heading_outer_styles(heading_colors),
-        strong_inner: fg(theme.md_text).bold(),
+        strong_inner: fg(strong).bold(),
         strong_outer: Style::new().dimmed().hidden(),
-        emphasis_inner: fg(theme.md_text).italic(),
+        emphasis_inner: fg(emphasis).italic(),
         emphasis_outer: Style::new().dimmed().hidden(),
         strikethrough_inner: fg(theme.md_text).strikethrough(),
         strikethrough_outer: Style::new().dimmed().hidden(),
-        inline_code_inner: fg(theme.md_code).bold(),
+        inline_code_inner: if is_grok_plus {
+            fg(theme.md_code).bold()
+        } else {
+            fg(theme.md_code).bold()
+        },
         inline_code_outer: fg(theme.md_code).dimmed().hidden(),
+        blockquote_inner: if is_grok_plus {
+            fg(quote_text)
+        } else {
+            fg(theme.md_text)
+        },
         // Selection-side bar detection (xai-grok-pager scrollback/blocks/
         // quote_bar.rs quote_bar_style) mirrors this exact style; its
         // end-to-end tests fail if this line changes.
-        blockquote_outer: fg(theme.md_muted).dimmed(),
+        blockquote_outer: if is_grok_plus {
+            fg(quote_bar)
+        } else {
+            fg(quote_bar).dimmed()
+        },
         task_checked: fg(theme.md_task_checked),
         task_unchecked: fg(theme.md_task_unchecked).dimmed(),
-        list_item: fg(theme.md_muted),
-        rule: fg(theme.md_muted),
+        list_item: fg(list),
+        rule: fg(rule),
         link_outer: fg(theme.md_muted),
         link_text: fg(theme.link_fg).underline(),
         link_url: fg(theme.md_muted),

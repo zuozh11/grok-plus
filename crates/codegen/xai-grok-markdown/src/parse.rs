@@ -567,6 +567,7 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                     Tag::Heading { level, .. } => {
                         Some(Some(self.ms.heading_inner[(*level as i32) as usize - 1]))
                     }
+                    Tag::BlockQuote(_) => Some(Some(strip_fg_in_link(self.ms.blockquote_inner))),
                     Tag::Emphasis => Some(Some(strip_fg_in_link(self.ms.emphasis_inner))),
                     Tag::Strong => Some(Some(strip_fg_in_link(self.ms.strong_inner))),
                     Tag::Strikethrough => Some(Some(strip_fg_in_link(self.ms.strikethrough_inner))),

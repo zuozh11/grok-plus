@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::scrollback::table_geometry::{CellRef, TableGeometry, WrappedCellJoiner};
 use crate::scrollback::types::SelectionBoundary;
-use crate::theme::Theme;
+use crate::theme::{Theme, ThemeKind};
 use xai_grok_markdown::{CellJoin, TableCopyMeta};
 
 // ---------------------------------------------------------------------------
@@ -865,6 +865,12 @@ pub fn reconstruct_table_selection_text_with_meta(
 /// Styled spans (inline code, links, syntax highlighting) join the band instead of inverting to their own colors.
 /// Terminal-native / colorless themes fall back to reverse video.
 pub(crate) fn apply_selection_highlight(theme: &Theme, cell: &mut ratatui::buffer::Cell) {
+    if Theme::current_kind() == ThemeKind::GrokPlus {
+        cell.modifier.remove(Modifier::REVERSED);
+        cell.set_fg(Color::Black);
+        cell.set_bg(Color::Rgb(255, 239, 92));
+        return;
+    }
     let band = theme.text_primary;
     if band == Color::Reset || theme.bg_base == Color::Reset {
         cell.modifier.insert(Modifier::REVERSED);

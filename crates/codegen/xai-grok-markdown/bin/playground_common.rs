@@ -58,6 +58,7 @@ pub const fn md_style(text: anstyle::Style) -> MarkdownStyle {
         strikethrough_outer: anstyle::Style::new().dimmed().hidden(),
         inline_code_inner: fg(YELLOW).bold(),
         inline_code_outer: fg(YELLOW).dimmed().hidden(),
+        blockquote_inner: text,
         blockquote_outer: fg(COMMENT).dimmed(),
         task_checked: fg(CYAN),
         task_unchecked: fg(BLUE).dimmed(),
