@@ -86,10 +86,12 @@ if [ "$force" -eq 1 ] || [ ! -x "$release_dir/grok-plus" ]; then
   mv "$stage" "$release_dir"
 fi
 
-ln -sfn "$release_dir" "$HOME_DIR/.current.new"
-mv -f "$HOME_DIR/.current.new" "$CURRENT_LINK"
-ln -sfn "$CURRENT_LINK/grok-plus" "$BIN_DIR/.grok-plus.new"
-mv -f "$BIN_DIR/.grok-plus.new" "$COMMAND_LINK"
+rm -f "$HOME_DIR/.current.new"
+ln -s "$release_dir" "$HOME_DIR/.current.new"
+/bin/mv -fh "$HOME_DIR/.current.new" "$CURRENT_LINK"
+rm -f "$BIN_DIR/.grok-plus.new"
+ln -s "$CURRENT_LINK/grok-plus" "$BIN_DIR/.grok-plus.new"
+/bin/mv -fh "$BIN_DIR/.grok-plus.new" "$COMMAND_LINK"
 
 curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$UPDATER.tmp"
 chmod 755 "$UPDATER.tmp"
