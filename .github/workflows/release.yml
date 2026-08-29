@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: write
+  issues: write
 
 concurrency:
   group: grok-plus-release
@@ -76,3 +77,15 @@ jobs:
             --latest \
             --title "grok-plus $VERSION" \
             --notes "Automated build from commit $(git rev-parse HEAD)."
+
+      - name: Notify successful update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          issue_url="$(gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "grok-plus $VERSION 已发布" \
+            --body "@zuozh11 grok-plus $VERSION 已自动编译并发布，本地自动更新器将在六小时内安装。")"
+          gh issue close "${issue_url##*/}" --repo "$GITHUB_REPOSITORY" --reason completed
