@@ -3,6 +3,10 @@ name: Release grok-plus
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - ".github/**"
+      - "README.md"
+      - "install.sh"
   workflow_dispatch:
     inputs:
       ref:

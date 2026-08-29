@@ -41,28 +41,20 @@ if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   exit 1
 fi
 
-if [ -n "$requested_version" ]; then
-  tag="v${requested_version#v}"
-  base_url="https://github.com/$REPO/releases/download/$tag"
-else
-  base_url="https://github.com/$REPO/releases/latest/download"
-fi
-
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/grok-plus.XXXXXX")"
-trap 'rm -rf "$tmp_dir"' EXIT INT TERM
-
-archive="$tmp_dir/$ASSET"
-checksum="$tmp_dir/$ASSET.sha256"
-curl -fsSL "$base_url/$ASSET" -o "$archive"
-curl -fsSL "$base_url/$ASSET.sha256" -o "$checksum"
-(cd "$tmp_dir" && shasum -a 256 -c "$ASSET.sha256" >/dev/null)
-tar -xzf "$archive" -C "$tmp_dir"
-
-version="$(cat "$tmp_dir/VERSION")"
 current_version=""
 if [ -f "$CURRENT_LINK/VERSION" ]; then
   current_version="$(cat "$CURRENT_LINK/VERSION")"
 fi
+
+if [ -n "$requested_version" ]; then
+  tag="v${requested_version#v}"
+  base_url="https://github.com/$REPO/releases/download/$tag"
+else
+  latest_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
+  tag="${latest_url##*/}"
+  base_url="https://github.com/$REPO/releases/latest/download"
+fi
+version="${tag#v}"
 
 if [ "$check" -eq 1 ]; then
   if [ "$current_version" = "$version" ]; then
@@ -73,9 +65,26 @@ if [ "$check" -eq 1 ]; then
   exit 0
 fi
 
+if [ "$force" -eq 0 ] && [ "$current_version" = "$version" ] && [ "$install_agent" -eq 0 ]; then
+  exit 0
+fi
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/grok-plus.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
 mkdir -p "$RELEASES_DIR" "$BIN_DIR" "$HOME_DIR"
 release_dir="$RELEASES_DIR/$version"
 if [ "$force" -eq 1 ] || [ ! -x "$release_dir/grok-plus" ]; then
+  archive="$tmp_dir/$ASSET"
+  checksum="$tmp_dir/$ASSET.sha256"
+  curl -fsSL "$base_url/$ASSET" -o "$archive"
+  curl -fsSL "$base_url/$ASSET.sha256" -o "$checksum"
+  (cd "$tmp_dir" && shasum -a 256 -c "$ASSET.sha256" >/dev/null)
+  tar -xzf "$archive" -C "$tmp_dir"
+  if [ "$(cat "$tmp_dir/VERSION")" != "$version" ]; then
+    echo "Release tag and archive version do not match." >&2
+    exit 1
+  fi
   stage="$RELEASES_DIR/.${version}.tmp.$$"
   rm -rf "$stage"
   mkdir -p "$stage"
