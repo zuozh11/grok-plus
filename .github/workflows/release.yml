@@ -36,6 +36,9 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
 
+      - name: Restore source timestamps
+        uses: chetan/git-restore-mtime-action@v2
+
       - name: Prepare build
         id: build
         shell: bash
