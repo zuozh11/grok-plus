@@ -103,5 +103,5 @@ jobs:
           issue_url="$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
             --title "grok-plus $VERSION 已发布" \
-            --body "@zuozh11 grok-plus $VERSION 已自动编译并发布，本地自动更新器将在六小时内安装。")"
+            --body "@zuozh11 grok-plus $VERSION 已自动编译并发布，下次启动 grok-plus 时会在后台安装。")"
           gh issue close "${issue_url##*/}" --repo "$GITHUB_REPOSITORY" --reason completed

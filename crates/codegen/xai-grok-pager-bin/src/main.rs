@@ -1928,6 +1928,27 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+fn spawn_grok_plus_auto_update() {
+    let home = std::env::var_os("GROK_PLUS_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".local/share/grok-plus"))
+        });
+    let Some(updater) = home.map(|home| home.join("update")) else {
+        return;
+    };
+    if !updater.is_file() {
+        return;
+    }
+    let _ = std::process::Command::new(updater)
+        .args(["--auto", "--quiet"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
 fn main() {
     if env::var_os("GROK_THEME").is_none() && env::var_os("LC_GROK_THEME").is_none() {
         // This happens before any worker threads start. Keep the custom binary
@@ -1948,6 +1969,9 @@ fn main() {
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
+    }
+    if args.command.is_none() {
+        spawn_grok_plus_auto_update();
     }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]

@@ -8,13 +8,13 @@ RELEASES_DIR="$HOME_DIR/releases"
 CURRENT_LINK="$HOME_DIR/current"
 COMMAND_LINK="$BIN_DIR/grok-plus"
 UPDATER="$HOME_DIR/update"
-LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.zuozhi.grok-plus.update.plist"
+AUTO_STAMP="$HOME_DIR/last-check"
 ASSET="grok-plus-aarch64-apple-darwin.tar.gz"
 
 force=0
 check=0
 quiet=0
-install_agent=1
+auto=0
 requested_version=""
 
 while [ "$#" -gt 0 ]; do
@@ -22,7 +22,7 @@ while [ "$#" -gt 0 ]; do
     --force) force=1 ;;
     --check) check=1 ;;
     --quiet) quiet=1 ;;
-    --no-launch-agent) install_agent=0 ;;
+    --auto) auto=1 ;;
     --version)
       shift
       requested_version="${1:?--version requires a value}"
@@ -39,6 +39,19 @@ log() {
 if [ "$(uname -s)" != "Darwin" ] || [ "$(uname -m)" != "arm64" ]; then
   echo "grok-plus currently supports Apple Silicon macOS only." >&2
   exit 1
+fi
+
+if [ "$auto" -eq 1 ]; then
+  now="$(date +%s)"
+  last=0
+  if [ -f "$AUTO_STAMP" ]; then
+    last="$(stat -f %m "$AUTO_STAMP" 2>/dev/null || printf 0)"
+  fi
+  if [ "$((now - last))" -lt 21600 ]; then
+    exit 0
+  fi
+  mkdir -p "$HOME_DIR"
+  touch "$AUTO_STAMP"
 fi
 
 current_version=""
@@ -65,7 +78,7 @@ if [ "$check" -eq 1 ]; then
   exit 0
 fi
 
-if [ "$force" -eq 0 ] && [ "$current_version" = "$version" ] && [ "$install_agent" -eq 0 ]; then
+if [ "$force" -eq 0 ] && [ "$current_version" = "$version" ] && [ "$auto" -eq 1 ]; then
   exit 0
 fi
 
@@ -105,37 +118,6 @@ ln -s "$CURRENT_LINK/grok-plus" "$BIN_DIR/.grok-plus.new"
 curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.sh" -o "$UPDATER.tmp"
 chmod 755 "$UPDATER.tmp"
 mv -f "$UPDATER.tmp" "$UPDATER"
-
-if [ "$install_agent" -eq 1 ]; then
-  mkdir -p "$(dirname "$LAUNCH_AGENT")"
-  : > "$HOME_DIR/update.log"
-  cat > "$LAUNCH_AGENT" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.zuozhi.grok-plus.update</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$UPDATER</string>
-    <string>--quiet</string>
-    <string>--no-launch-agent</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>StartInterval</key>
-  <integer>21600</integer>
-  <key>StandardOutPath</key>
-  <string>$HOME_DIR/update.log</string>
-  <key>StandardErrorPath</key>
-  <string>$HOME_DIR/update.log</string>
-</dict>
-</plist>
-EOF
-  launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
-fi
 
 log "Installed grok-plus $version"
 log "Command: $COMMAND_LINK"

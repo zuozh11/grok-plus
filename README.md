@@ -47,10 +47,10 @@ curl -fsSL https://raw.githubusercontent.com/zuozh11/grok-plus/main/install.sh |
 grok-plus --version
 ```
 
-The installer keeps grok-plus under `~/.local/share/grok-plus`, exposes it as
-`~/.local/bin/grok-plus`, and installs a macOS LaunchAgent that checks this
-repository's latest GitHub Release every six hours. It does not replace or
-modify the official `grok` executable.
+The installer keeps grok-plus under `~/.local/share/grok-plus` and exposes it
+as `~/.local/bin/grok-plus`. Interactive launches check this repository's
+latest GitHub Release in the background at most once every six hours. It does
+not install a LaunchAgent or replace the official `grok` executable.
 
 Run `grok-plus update` to update immediately, or `grok-plus update --check`
 to check without installing.
