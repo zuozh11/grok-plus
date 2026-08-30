@@ -36,22 +36,21 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
 
-      - name: Prepare version
-        id: version
+      - name: Prepare build
+        id: build
         shell: bash
         run: |
           epoch="$(git show -s --format=%ct HEAD)"
-          version="1.1.$epoch"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-
-      - name: Install DotSlash
-        run: cargo install dotslash --locked
+          build_id="build-$epoch"
+          grok_version="$(awk -F '"' '/^version = / { print $2; exit }' crates/codegen/xai-grok-pager-bin/Cargo.toml)"
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "grok_version=$grok_version" >> "$GITHUB_OUTPUT"
 
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
           path: |
+            ~/.cargo/bin/dotslash
             ~/.cargo/registry
             ~/.cargo/git
             target
@@ -59,49 +58,52 @@ jobs:
           restore-keys: |
             macos-arm64-cargo-${{ hashFiles('Cargo.lock') }}-
 
+      - name: Install DotSlash
+        run: command -v dotslash >/dev/null || cargo install dotslash --locked
+
       - name: Build
         env:
-          GROK_VERSION: ${{ steps.version.outputs.version }}
           CARGO_INCREMENTAL: "0"
         run: cargo build --release -p xai-grok-pager-bin --bin grok-plus
 
       - name: Package
         shell: bash
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
         run: |
           mkdir -p dist/package
           cp target/release/grok-plus dist/package/grok-plus
-          printf '%s\n' "$VERSION" > dist/package/VERSION
-          tar -C dist/package -czf dist/grok-plus-aarch64-apple-darwin.tar.gz grok-plus VERSION
+          printf '%s\n' "$BUILD_ID" > dist/package/BUILD_ID
+          tar -C dist/package -czf dist/grok-plus-aarch64-apple-darwin.tar.gz grok-plus BUILD_ID
           (cd dist && shasum -a 256 grok-plus-aarch64-apple-darwin.tar.gz > grok-plus-aarch64-apple-darwin.tar.gz.sha256)
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+          GROK_VERSION: ${{ steps.build.outputs.grok_version }}
         shell: bash
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists."
+          if gh release view "$BUILD_ID" >/dev/null 2>&1; then
+            echo "Release $BUILD_ID already exists."
             exit 0
           fi
-          gh release create "$TAG" \
+          gh release create "$BUILD_ID" \
             dist/grok-plus-aarch64-apple-darwin.tar.gz \
             dist/grok-plus-aarch64-apple-darwin.tar.gz.sha256 \
             --latest \
-            --title "grok-plus $VERSION" \
+            --title "grok-plus $BUILD_ID (Grok $GROK_VERSION)" \
             --notes "Automated build from commit $(git rev-parse HEAD)."
 
       - name: Notify successful update
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_ID: ${{ steps.build.outputs.build_id }}
+          GROK_VERSION: ${{ steps.build.outputs.grok_version }}
         shell: bash
         run: |
           issue_url="$(gh issue create \
             --repo "$GITHUB_REPOSITORY" \
-            --title "grok-plus $VERSION 已发布" \
-            --body "@zuozh11 grok-plus $VERSION 已自动编译并发布，下次启动 grok-plus 时会在后台安装。")"
+            --title "grok-plus $BUILD_ID 已发布" \
+            --body "@zuozh11 grok-plus $BUILD_ID 已自动编译并发布，对应 Grok $GROK_VERSION。需要时运行 grok-plus update 安装。")"
           gh issue close "${issue_url##*/}" --repo "$GITHUB_REPOSITORY" --reason completed

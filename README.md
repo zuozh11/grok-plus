@@ -48,9 +48,8 @@ grok-plus --version
 ```
 
 The installer keeps grok-plus under `~/.local/share/grok-plus` and exposes it
-as `~/.local/bin/grok-plus`. Interactive launches check this repository's
-latest GitHub Release in the background at most once every six hours. It does
-not install a LaunchAgent or replace the official `grok` executable.
+as `~/.local/bin/grok-plus`. Updates are manual; it does not run a background
+checker, install a LaunchAgent, or replace the official `grok` executable.
 
 Run `grok-plus update` to update immediately, or `grok-plus update --check`
 to check without installing.
