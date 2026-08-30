@@ -1618,6 +1618,13 @@ fn render_spacer_halos(
     line_bg: &[Option<Color>],
     base: Color,
 ) {
+    // A half-block cannot represent transparency: `Reset` as its foreground is
+    // rendered with the terminal's default text colour, producing a bright
+    // horizontal stripe above or below hovered / selected rows.
+    if base == Color::Reset {
+        return;
+    }
+
     for (i, slot) in line_bg.iter().enumerate() {
         if slot.is_some() {
             continue;
