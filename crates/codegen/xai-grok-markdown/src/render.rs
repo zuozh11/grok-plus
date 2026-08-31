@@ -1177,11 +1177,7 @@ mod tests {
             "Pretty mode should remove '[' from link. Got: {:?}",
             lines[0]
         );
-        assert!(
-            lines[0].contains("link (https://example.com)"),
-            "Pretty mode should render 'link (url)'. Got: {:?}",
-            lines[0]
-        );
+        assert_eq!(lines[0], "Here is a link in text.");
     }
 
     /// Same regression for images: `![img](src)` should not show `[img`.

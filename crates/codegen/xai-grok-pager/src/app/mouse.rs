@@ -415,9 +415,7 @@ impl AgentView {
                 {
                     self.set_active_pane(AgentPane::Prompt, false);
                     self.btw_focused = true;
-                    if is_link_modifier_held(mouse.modifiers)
-                        && self.try_arm_link_click(mouse.column, mouse.row)
-                    {
+                    if self.try_arm_link_click(mouse.column, mouse.row) {
                         self.pending_scrollback_click = None;
                         return InputOutcome::Changed;
                     }
@@ -704,9 +702,7 @@ impl AgentView {
                         self.persistent_text_selection = None;
                         self.table_selection_geometry = None;
                         self.selection_created_at = None;
-                        if is_link_modifier_held(mouse.modifiers)
-                            && self.try_arm_link_click(mouse.column, mouse.row)
-                        {
+                        if self.try_arm_link_click(mouse.column, mouse.row) {
                             self.pending_scrollback_click = None;
                             return InputOutcome::Changed;
                         }

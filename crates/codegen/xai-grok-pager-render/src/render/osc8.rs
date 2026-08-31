@@ -359,6 +359,7 @@ pub fn local_link_to_file_target(
     if lower.starts_with("mailto:") || lower.starts_with("tel:") {
         return None;
     }
+    let dest = dest.split_once('#').map_or(dest, |(path, _)| path);
     let path = Path::new(dest);
     let target = crate::render::tool_paths::resolve_tool_path_target(dest, None)?;
     let resolved: PathBuf = if target.is_absolute() {
@@ -787,6 +788,13 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), b"fn main() {}").unwrap();
 
         let target = local_link_to_file_target("src/main.rs", &[], Some(dir.path())).unwrap();
+        assert_eq!(
+            target,
+            LinkTarget::File(Arc::from(dir.path().join("src/main.rs").as_path()))
+        );
+
+        let target =
+            local_link_to_file_target("src/main.rs#L1-L3", &[], Some(dir.path())).unwrap();
         assert_eq!(
             target,
             LinkTarget::File(Arc::from(dir.path().join("src/main.rs").as_path()))
