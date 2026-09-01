@@ -1,5 +1,3 @@
-//! Input handling (keys, mouse).
-
 pub mod key;
 pub mod keyboard_normalizer;
 pub mod line_editor;

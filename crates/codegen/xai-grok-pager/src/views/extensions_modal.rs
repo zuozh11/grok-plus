@@ -1185,7 +1185,8 @@ fn action_key_footer_desc_for_mapping(
     }
 }
 
-/// Whether removal can succeed for the Hooks-tab selection (`HookInfo::removable`): only user-registered directories are.
+/// Whether removal can succeed for the Hooks-tab selection (`HookInfo::removable`): only user-registered directories without a managed-policy member are.
+/// The `hook_source_pinned` check backstops older shells whose `removable` reflects registration alone; a current shell already reports `removable: false` on every member of a pinned source, so the check is redundant there.
 /// Headers resolve via group key.
 fn selected_hook_source_removable_at(
     state: &ExtensionsModalState,
@@ -1204,12 +1205,15 @@ fn selected_hook_source_removable_at(
         return data
             .hooks
             .iter()
-            .any(|h| &h.source_dir == source_dir && h.removable);
+            .any(|h| &h.source_dir == source_dir && h.removable)
+            && !hook_source_pinned(&data.hooks, source_dir);
     }
     let Some(idx) = data_index_at(entry_data_indices, selected) else {
         return true;
     };
-    data.hooks.get(idx).is_none_or(|h| h.removable)
+    data.hooks
+        .get(idx)
+        .is_none_or(|h| h.removable && !hook_source_pinned(&data.hooks, &h.source_dir))
 }
 
 /// Hooks-tab selections the dispatcher would refuse to toggle: a pinned hook row, or a group header whose group has no unpinned members.
@@ -1938,41 +1942,37 @@ impl ExtensionsModalState {
         self.picker_state.hovered = None;
     }
 
-    /// Seed the all-collapsed default for hook source groups exactly once.
-    /// Refetches preserve the user's expand state (re-collapsing shifted rows under the selection and notice anchor).
-    /// Same pattern as [`Self::seed_plugin_groups_once`].
+    /// Seed the all-collapsed default for hook source groups once, on the first non-empty delivery.
+    /// Called from both hook-data delivery channels (list fetch and the `HooksChanged` push).
     pub fn seed_hook_groups_once(&mut self, hooks: &[xai_hooks_plugins_types::HookInfo]) {
-        if self.hooks_groups_seeded {
-            return;
-        }
-        self.hooks_collapsed_groups = hooks.iter().map(|h| h.source_dir.clone()).collect();
-        self.hooks_groups_seeded = true;
+        seed_groups_once(
+            &mut self.hooks_groups_seeded,
+            &mut self.hooks_collapsed_groups,
+            hooks,
+            |h| h.source_dir.clone(),
+        );
     }
 
-    /// Seed the all-collapsed default for plugin source groups exactly once.
-    ///
+    /// Seed the all-collapsed default for plugin source groups once, on the first non-empty delivery.
     /// Called from both plugin-data delivery channels (list fetch and the `PluginsChanged` push).
-    /// The first to deliver seeds; later deliveries preserve the user's expand state.
     pub fn seed_plugin_groups_once(&mut self, plugins: &[xai_hooks_plugins_types::PluginInfo]) {
-        if self.plugins_groups_seeded {
-            return;
-        }
-        self.plugins_collapsed_groups = plugins.iter().map(|p| plugin_group(p).key).collect();
-        self.plugins_groups_seeded = true;
+        seed_groups_once(
+            &mut self.plugins_groups_seeded,
+            &mut self.plugins_collapsed_groups,
+            plugins,
+            |p| plugin_group(p).key,
+        );
     }
 
-    /// Seed default-collapsed skill source groups exactly once.
-    ///
-    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups`; later reloads leave the set alone so user expand state survives.
+    /// Seed default-collapsed skill source groups once, on the first non-empty
+    /// delivery, keyed by [`SkillGroup::label`].
     pub fn seed_skills_groups_once(&mut self, skills: &[SkillInfo]) {
-        if self.skills_groups_seeded {
-            return;
-        }
-        for skill in skills {
-            self.skills_collapsed_groups
-                .insert(skill_group(skill).label);
-        }
-        self.skills_groups_seeded = true;
+        seed_groups_once(
+            &mut self.skills_groups_seeded,
+            &mut self.skills_collapsed_groups,
+            skills,
+            |s| skill_group(s).label,
+        );
     }
 
     /// Whether a group header at picker index `sel` with the given `group_key` is currently expanded (children visible).
@@ -2221,6 +2221,23 @@ pub(crate) fn build_mcp_servers_picker_rows(
         }
     }
     out
+}
+
+/// Shared rule for the hook/plugin/skill group-collapse seeds: collapse every
+/// group once, on the first non-empty delivery. An empty list must not finish
+/// seeding (groups arriving later would open expanded instead of getting the
+/// collapsed default), and later deliveries preserve the user's expand state.
+fn seed_groups_once<T>(
+    seeded: &mut bool,
+    collapsed_groups: &mut std::collections::HashSet<String>,
+    items: &[T],
+    group_key: impl Fn(&T) -> String,
+) {
+    if *seeded || items.is_empty() {
+        return;
+    }
+    collapsed_groups.extend(items.iter().map(group_key));
+    *seeded = true;
 }
 
 /// On first MCP list load, collapse each distinct plugin section by default.
@@ -5219,6 +5236,35 @@ mod tests {
         }
     }
 
+    /// The x hint must mirror the remove handler: a managed-policy member
+    /// makes the whole source unremovable even when the shell reports the
+    /// directory as user-registered (`removable: true` — older shells set it
+    /// from registration alone).
+    #[test]
+    fn remove_hint_suppressed_for_registered_but_pinned_source() {
+        let mut pinned = make_hook("policy/a", "/reg/policy", false);
+        pinned.pinned = true;
+        pinned.removable = true;
+        let mut sibling = make_hook("user/b", "/reg/policy", false);
+        sibling.removable = true;
+
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Hooks);
+        state.hooks_data = TabDataState::Loaded(xai_hooks_plugins_types::HooksListResponse {
+            hooks: vec![pinned, sibling],
+            project_trusted: true,
+            load_errors: Vec::new(),
+        });
+        // 0: header, 1: pinned row, 2: unpinned sibling row.
+        let data_indices = vec![None, Some(0), Some(1)];
+        let group_keys = vec![Some("/reg/policy".to_string()), None, None];
+        for sel in 0..3 {
+            assert!(
+                !selected_hook_source_removable_at(&state, &data_indices, &group_keys, sel),
+                "selection {sel} must not offer x remove for a pinned source"
+            );
+        }
+    }
+
     /// Regression: refetches must not re-collapse expanded groups.
     #[test]
     fn hook_groups_seed_only_once() {
@@ -5227,6 +5273,9 @@ mod tests {
             make_hook("a", "/src1", false),
             make_hook("b", "/src2", false),
         ];
+        // An empty first delivery must not finish seeding: sources arriving
+        // later would open expanded instead of getting the collapsed default.
+        state.seed_hook_groups_once(&[]);
         state.seed_hook_groups_once(&hooks);
         assert!(state.hooks_collapsed_groups.contains("/src1"));
         assert!(state.hooks_collapsed_groups.contains("/src2"));
@@ -5236,6 +5285,20 @@ mod tests {
         state.seed_hook_groups_once(&hooks);
         assert!(!state.hooks_collapsed_groups.contains("/src1"));
         assert!(state.hooks_collapsed_groups.contains("/src2"));
+    }
+
+    /// The plugin and skill seeds share the hooks seed's empty-first-delivery
+    /// rule (an empty list leaves seeding open for the next delivery).
+    #[test]
+    fn plugin_and_skill_group_seeds_skip_empty_first_delivery() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
+        state.seed_plugin_groups_once(&[]);
+        state.seed_plugin_groups_once(&[make_plugin("p")]);
+        assert!(!state.plugins_collapsed_groups.is_empty());
+
+        state.seed_skills_groups_once(&[]);
+        state.seed_skills_groups_once(&[make_skill("alpha", "a")]);
+        assert!(state.skills_collapsed_groups.contains("User"));
     }
 
     /// Regression: footer Space verb must follow the *current* entry-mapping (post filter/query/tab), not a stale one from the previous list shape.

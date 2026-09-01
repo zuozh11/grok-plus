@@ -1963,6 +1963,41 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
 }
 
 #[test]
+fn credit_limit_402_does_not_overwrite_stash_when_in_flight_cleared() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.turn_started_at = Some(std::time::Instant::now());
+        agent.session.in_flight_prompt = None;
+        agent.credit_limit_stashed_prompt = Some(crate::app::agent::InFlightPrompt {
+            text: "kept".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+    }
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
+            http_status: Some(402),
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&id]
+            .credit_limit_stashed_prompt
+            .as_ref()
+            .map(|p| p.text.as_str()),
+        Some("kept")
+    );
+}
+
+#[test]
 fn prompt_response_disk_full_suppresses_turn_failed_and_toast() {
     fn run(pre_seed_disk_full: bool, with_user_echo: bool) -> (bool, bool, usize) {
         let mut app = test_app_with_agent();

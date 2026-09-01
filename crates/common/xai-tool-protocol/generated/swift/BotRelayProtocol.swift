@@ -15,9 +15,6 @@ public typealias BotEmptyResult = BotEmptyParams
 /// Upstream-verbatim command result. Not interpreted by this crate.
 public typealias BotCommandResult = BotRelayJSONValue
 
-/// `bot.vncDescriptor` params.
-public typealias BotVncDescriptorParams = BotEmptyParams
-
 /// `bot.roster` params. Cold — never wakes the box.
 public typealias BotRosterParams = BotEmptyParams
 
@@ -77,6 +74,15 @@ public struct BotCommandParams: Codable {
 	}
 }
 
+/// `bot.vncDescriptor` params.
+public struct BotVncDescriptorParams: Codable {
+	public let agentId: String
+
+	public init(agentId: String) {
+		self.agentId = agentId
+	}
+}
+
 /// `bot.vncDescriptor` result.
 /// 
 /// `expires_hint` is unix milliseconds. `null` means a legacy network-token
@@ -108,8 +114,12 @@ public struct BotVncDescriptorResult: Codable {
 public struct BotRosterEntry: Codable {
 	public let agentId: String
 	public let name: String
+	/// One of `running`, `idle` or `unknown`. A row read off-box is always
+	/// `unknown`: the durable registry holds identities, not activity. A later
+	/// read against a live box replaces it.
 	public let status: String
-	/// Unix time in milliseconds of the agent's last turn, when known.
+	/// Unix time in milliseconds of the agent's last turn. Absent on a cold
+	/// row: the durable registry records no turn time.
 	public let lastTurnAt: Int64?
 
 	public init(agentId: String, name: String, status: String, lastTurnAt: Int64?) {
@@ -232,7 +242,9 @@ public struct BotRelayErrorDetail: Codable {
 /// 
 /// Wire form: `{code, retryable, detail, reason?}`.
 /// `detail` is always present (empty object when unused).
-/// `reason` is set only for [`BotRelayErrorCode::CommandRejected`].
+/// `reason` is set for [`BotRelayErrorCode::CommandRejected`] and for the
+/// link-state codes ([`BotRelayErrorCode::is_link_state`]), where it
+/// carries the exchange's machine reason token for per-case client copy.
 /// 
 /// On the JSON-RPC envelope this object is `error.data`. Receivers
 /// switch on `data.code`. The envelope `error.message` is the snake_case
@@ -354,6 +366,34 @@ public enum BotRunState: String, Codable {
 /// as `upstream_error` and keep `retryable` / `detail`.
 public enum BotRelayErrorCode: String, Codable {
 	case identityUnavailable = "identity_unavailable"
+	/// The xAI account has never been linked to a Cursor account. The user
+	/// must run the link flow (or JIT provisions once opted in).
+	case linkRequired = "link_required"
+	/// The link was explicitly removed (a sticky unlink on the Cursor
+	/// side). Re-linking takes an explicit flow, never a silent retry.
+	case linkRemoved = "link_removed"
+	/// Linking needs the user's recorded consent before an existing Cursor
+	/// account can be attached. Definitive until the consent UX runs.
+	case consentRequired = "consent_required"
+	/// Enterprise-managed on either side (enterprise-claimed email domain,
+	/// active team, or server-side enterprise policy); the flow serves
+	/// self-serve accounts only. `reason` names which rule refused.
+	case enterpriseUnsupported = "enterprise_unsupported"
+	/// The matched Cursor account is on legacy request-based pricing.
+	case legacyPricingUnsupported = "legacy_pricing_unsupported"
+	/// The xAI account has no verified email, so no Cursor account can be
+	/// matched or created. Fixable on the xAI side.
+	case emailUnverified = "email_unverified"
+	/// Linking hit a conflict that needs manual resolution: the email
+	/// matches multiple accounts, or a 1:1 link rule declined the pair.
+	/// `reason` distinguishes.
+	case linkConflict = "link_conflict"
+	/// A link exists, but its Cursor account is gone or unusable.
+	case cursorAccountUnavailable = "cursor_account_unavailable"
+	/// Definitive self-serve refusal this client build does not know more
+	/// precisely (a reason token newer than the mapping). `reason` carries
+	/// the token verbatim.
+	case linkUnsupported = "link_unsupported"
 	case noPlan = "no_plan"
 	case usageExhausted = "usage_exhausted"
 	case boxMigrating = "box_migrating"
@@ -428,6 +468,12 @@ public let COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: String = "attachm
 /// `reason` on `command_rejected` when Live mode cannot interrupt or look up
 public let COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE: String = "not_supported_in_live"
 
+/// `reason` on `command_rejected` when attachUpload cannot fetch the file because this connection has no usable credential.
+public let COMMAND_REJECTED_ATTACHMENT_CREDENTIAL_UNAVAILABLE: String = "attachment_credential_unavailable"
+
+/// `reason` on `command_rejected` when the owning harness refused the send.
+public let COMMAND_REJECTED_HARNESS_REFUSED: String = "harness_refused"
+
 /// `reason` on `command_rejected` when attachUpload cannot see the file (missing or not the caller's).
 public let COMMAND_REJECTED_ATTACHMENT_NOT_FOUND: String = "attachment_not_found"
 
@@ -450,10 +496,84 @@ public func isGatewayMethodUnsupported(_ error: BotRelayError) -> Bool {
 
 // Allowlisted bot-relay command schema (Args+Reply transitive closure).
 // Source: crates/common/xai-grok-bot-upstream/src/generated/{defs,methods}.rs
-// Schema closure: 167 types.
+// Schema closure: 197 types.
 
 public struct ArgsClearTrays: Codable {
 	public init() {}
+}
+
+public struct ArgsCreateGroup: Codable {
+	public let description: String?
+	public let memberAgentIds: [String]
+	public let name: String
+	public init(description: String? = nil, memberAgentIds: [String], name: String) {
+		self.description = description
+		self.memberAgentIds = memberAgentIds
+		self.name = name
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, memberAgentIds, name
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(memberAgentIds, forKey: .memberAgentIds)
+		try container.encode(name, forKey: .name)
+	}
+}
+
+public struct ArgsDeleteAgents: Codable {
+	public let ids: [String]
+	public init(ids: [String]) {
+		self.ids = ids
+	}
+}
+
+public struct ArgsDiscardDraft: Codable {
+	public let agentId: String
+	public let entryId: String
+	public init(agentId: String, entryId: String) {
+		self.agentId = agentId
+		self.entryId = entryId
+	}
+}
+
+public struct ArgsDismissUserForm: Codable {
+	public let agentId: String
+	public let entryId: String
+	public let mode: ArgsDismissUserFormMode
+	public let platform: ArgsDismissUserFormPlatform?
+	public init(agentId: String, entryId: String, mode: ArgsDismissUserFormMode, platform: ArgsDismissUserFormPlatform? = nil) {
+		self.agentId = agentId
+		self.entryId = entryId
+		self.mode = mode
+		self.platform = platform
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, entryId, mode, platform
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encode(mode, forKey: .mode)
+		try container.encodeIfPresent(platform, forKey: .platform)
+	}
+}
+
+public struct ArgsDismissUserFormMode: RawRepresentable, Codable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let dismissed = ArgsDismissUserFormMode(rawValue: "dismissed")
+	public static let escalated = ArgsDismissUserFormMode(rawValue: "escalated")
+}
+
+public struct ArgsDismissUserFormPlatform: RawRepresentable, Codable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let android = ArgsDismissUserFormPlatform(rawValue: "android")
+	public static let desktop = ArgsDismissUserFormPlatform(rawValue: "desktop")
+	public static let ios = ArgsDismissUserFormPlatform(rawValue: "ios")
 }
 
 public struct ArgsGetAgentThread: Codable {
@@ -511,6 +631,13 @@ public struct ArgsGetAgentTranscriptTail: Codable {
 	}
 }
 
+public struct ArgsInjectChromeCookies: Codable {
+	public let cookies: [ChromeCookieRecord]
+	public init(cookies: [ChromeCookieRecord]) {
+		self.cookies = cookies
+	}
+}
+
 public struct ArgsReactToMessage: Codable {
 	public let agentId: String
 	public let emoji: String
@@ -536,6 +663,17 @@ public struct ArgsReadVoiceCallAgentContext: Codable {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encode(id, forKey: .id)
 		try container.encodeIfPresent(sentMessageId, forKey: .sentMessageId)
+	}
+}
+
+public struct ArgsRespondToWidget: Codable {
+	public let agentId: String
+	public let entryId: String
+	public let value: String
+	public init(agentId: String, entryId: String, value: String) {
+		self.agentId = agentId
+		self.entryId = entryId
+		self.value = value
 	}
 }
 
@@ -575,6 +713,149 @@ public struct ArgsSetAgentUnread: Codable {
 		try container.encode(isUnread, forKey: .isUnread)
 	}
 }
+
+public struct ArgsSetGroupMembers: Codable {
+	public let id: String
+	public let memberAgentIds: [String]
+	public let requesterAgentId: String?
+	public init(id: String, memberAgentIds: [String], requesterAgentId: String? = nil) {
+		self.id = id
+		self.memberAgentIds = memberAgentIds
+		self.requesterAgentId = requesterAgentId
+	}
+	enum CodingKeys: String, CodingKey {
+		case id, memberAgentIds, requesterAgentId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(id, forKey: .id)
+		try container.encode(memberAgentIds, forKey: .memberAgentIds)
+		try container.encodeIfPresent(requesterAgentId, forKey: .requesterAgentId)
+	}
+}
+
+public struct ArgsSubmitUserForm: Codable {
+	public let agentId: String
+	public let entryId: String
+	public let platform: ArgsSubmitUserFormPlatform?
+	public let values: [String: String]
+	public init(agentId: String, entryId: String, platform: ArgsSubmitUserFormPlatform? = nil, values: [String: String]) {
+		self.agentId = agentId
+		self.entryId = entryId
+		self.platform = platform
+		self.values = values
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, entryId, platform, values
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(platform, forKey: .platform)
+		try container.encode(values, forKey: .values)
+	}
+}
+
+public struct ArgsSubmitUserFormPlatform: RawRepresentable, Codable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let android = ArgsSubmitUserFormPlatform(rawValue: "android")
+	public static let desktop = ArgsSubmitUserFormPlatform(rawValue: "desktop")
+	public static let ios = ArgsSubmitUserFormPlatform(rawValue: "ios")
+}
+
+public struct ArgsUpdateAgent: Codable {
+	public let id: String
+	public let profile: SandAgentProfile
+	public init(id: String, profile: SandAgentProfile) {
+		self.id = id
+		self.profile = profile
+	}
+}
+
+public struct ChromeCookieRecord: Codable {
+	public let domain: String
+	public let expires: Double
+	public let httpOnly: Bool
+	public let name: String
+	public let partitionKey: ChromeCookieRecordPartitionKey?
+	public let path: String
+	public let priority: ChromeCookieRecordPriority?
+	public let sameSite: ChromeCookieRecordSameSite?
+	public let secure: Bool
+	public let session: Bool?
+	public let value: CookieValue
+	public init(domain: String, expires: Double, httpOnly: Bool, name: String, partitionKey: ChromeCookieRecordPartitionKey? = nil, path: String, priority: ChromeCookieRecordPriority? = nil, sameSite: ChromeCookieRecordSameSite? = nil, secure: Bool, session: Bool? = nil, value: CookieValue) {
+		self.domain = domain
+		self.expires = expires
+		self.httpOnly = httpOnly
+		self.name = name
+		self.partitionKey = partitionKey
+		self.path = path
+		self.priority = priority
+		self.sameSite = sameSite
+		self.secure = secure
+		self.session = session
+		self.value = value
+	}
+	enum CodingKeys: String, CodingKey {
+		case domain, expires, httpOnly, name, partitionKey, path, priority, sameSite, secure, session, value
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(domain, forKey: .domain)
+		try container.encode(expires, forKey: .expires)
+		try container.encode(httpOnly, forKey: .httpOnly)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(partitionKey, forKey: .partitionKey)
+		try container.encode(path, forKey: .path)
+		try container.encodeIfPresent(priority, forKey: .priority)
+		try container.encodeIfPresent(sameSite, forKey: .sameSite)
+		try container.encode(secure, forKey: .secure)
+		try container.encodeIfPresent(session, forKey: .session)
+		try container.encode(value, forKey: .value)
+	}
+}
+
+public enum ChromeCookieRecordPartitionKey: Codable {
+	case object([String: BotRelayJSONValue])
+	case null
+	case string(String)
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode([String: BotRelayJSONValue].self) { self = .object(v); return }
+		if container.decodeNil() { self = .null; return }
+		if let v = try? container.decode(String.self) { self = .string(v); return }
+		throw DecodingError.typeMismatch(ChromeCookieRecordPartitionKey.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown ChromeCookieRecordPartitionKey value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .object(let v): try container.encode(v)
+		case .null: try container.encodeNil()
+		case .string(let v): try container.encode(v)
+		}
+	}
+}
+
+public struct ChromeCookieRecordPriority: RawRepresentable, Codable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let high = ChromeCookieRecordPriority(rawValue: "High")
+	public static let low = ChromeCookieRecordPriority(rawValue: "Low")
+	public static let medium = ChromeCookieRecordPriority(rawValue: "Medium")
+}
+
+public struct ChromeCookieRecordSameSite: RawRepresentable, Codable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let lax = ChromeCookieRecordSameSite(rawValue: "Lax")
+	public static let none = ChromeCookieRecordSameSite(rawValue: "None")
+	public static let strict = ChromeCookieRecordSameSite(rawValue: "Strict")
+}
+
+public typealias CookieValue = String
 
 public struct GatewayAcceptanceStatusArgs: Codable {
 	public let accountSlot: String
@@ -681,6 +962,29 @@ public struct PromptAcceptanceStatus: RawRepresentable, Codable, Equatable, Hash
 	public static let accepted = PromptAcceptanceStatus(rawValue: "accepted")
 	public static let pending = PromptAcceptanceStatus(rawValue: "pending")
 	public static let rejected = PromptAcceptanceStatus(rawValue: "rejected")
+}
+
+public struct ReplyInjectChromeCookies: Codable {
+	public let chromeDebugPorts: Double?
+	public let injected: Double
+	public let monitorsReached: Double?
+	public let sites: Double
+	public init(chromeDebugPorts: Double? = nil, injected: Double, monitorsReached: Double? = nil, sites: Double) {
+		self.chromeDebugPorts = chromeDebugPorts
+		self.injected = injected
+		self.monitorsReached = monitorsReached
+		self.sites = sites
+	}
+	enum CodingKeys: String, CodingKey {
+		case chromeDebugPorts, injected, monitorsReached, sites
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(chromeDebugPorts, forKey: .chromeDebugPorts)
+		try container.encode(injected, forKey: .injected)
+		try container.encodeIfPresent(monitorsReached, forKey: .monitorsReached)
+		try container.encode(sites, forKey: .sites)
+	}
 }
 
 public enum ReplyReadAttachmentTextValue: Codable {
@@ -820,6 +1124,32 @@ public struct SandAgentOrigin: RawRepresentable, Codable, Equatable, Hashable {
 	public static let user = SandAgentOrigin(rawValue: "user")
 }
 
+public struct SandAgentProfile: Codable {
+	public let avatarColor: String?
+	public let avatarShape: String?
+	public let description: String
+	public let name: String
+	public let title: String?
+	public init(avatarColor: String? = nil, avatarShape: String? = nil, description: String, name: String, title: String? = nil) {
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.description = description
+		self.name = name
+		self.title = title
+	}
+	enum CodingKeys: String, CodingKey {
+		case avatarColor, avatarShape, description, name, title
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(avatarColor, forKey: .avatarColor)
+		try container.encodeIfPresent(avatarShape, forKey: .avatarShape)
+		try container.encode(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(title, forKey: .title)
+	}
+}
+
 public struct SandAgentSummary: Codable {
 	public let activeRemoteMemberId: String?
 	public let avatarColor: String?
@@ -842,7 +1172,7 @@ public struct SandAgentSummary: Codable {
 	public let isRunningTurn: Bool?
 	public let isSharedRoom: Bool?
 	public let lastActivityAt: Double?
-	public let lastEntry: SandAgentSummaryLastEntry
+	public let lastEntry: SandAgentSummaryLastEntry?
 	public let lastMessageAuthorId: String?
 	public let lastMessageId: String?
 	public let lastMessagePreview: String?
@@ -870,7 +1200,7 @@ public struct SandAgentSummary: Codable {
 	public let updatedAt: Double
 	public let viewerIsOwner: Bool?
 	public let visibility: SandAgentSummaryVisibility?
-	public init(activeRemoteMemberId: String? = nil, avatarColor: String? = nil, avatarDataUrl: String? = nil, avatarShape: String? = nil, avatarVersion: String? = nil, awaitingUserResponse: SandAgentAwaitingState? = nil, createdAt: Double, currentActivity: SandAgentActivity? = nil, description: String, harness: String? = nil, hasUnread: Bool, id: String, isActive: Bool, isComposingMessage: Bool, isGroup: Bool, isHiddenFromSidebar: Bool? = nil, isRetrying: Bool? = nil, isRunning: Bool, isRunningTurn: Bool? = nil, isSharedRoom: Bool? = nil, lastActivityAt: Double? = nil, lastEntry: SandAgentSummaryLastEntry, lastMessageAuthorId: String? = nil, lastMessageId: String? = nil, lastMessagePreview: String? = nil, lastMessagePreviewSource: SandAgentSummaryLastMessagePreviewSource? = nil, lastViewedAt: Double? = nil, memberIds: [String], name: String, newestEntryId: String? = nil, notificationsEnabled: Bool, notifyOnUpdatesEnabled: Bool, origin: SandAgentOrigin, path: String, purpose: SandAgentSummaryPurpose? = nil, pushMessageContent: SandPushMessageContentPayload? = nil, remoteMembers: [SandAgentSummaryRemoteMembersItem]? = nil, remoteRoom: SandAgentSummaryRemoteRoom? = nil, serverId: String? = nil, sharedRoomId: String? = nil, slackConnected: Bool? = nil, snapshotEpoch: String? = nil, snapshotSeq: Double? = nil, teamId: Double? = nil, title: String? = nil, unreadCount: Double? = nil, updatedAt: Double, viewerIsOwner: Bool? = nil, visibility: SandAgentSummaryVisibility? = nil) {
+	public init(activeRemoteMemberId: String? = nil, avatarColor: String? = nil, avatarDataUrl: String? = nil, avatarShape: String? = nil, avatarVersion: String? = nil, awaitingUserResponse: SandAgentAwaitingState? = nil, createdAt: Double, currentActivity: SandAgentActivity? = nil, description: String, harness: String? = nil, hasUnread: Bool, id: String, isActive: Bool, isComposingMessage: Bool, isGroup: Bool, isHiddenFromSidebar: Bool? = nil, isRetrying: Bool? = nil, isRunning: Bool, isRunningTurn: Bool? = nil, isSharedRoom: Bool? = nil, lastActivityAt: Double? = nil, lastEntry: SandAgentSummaryLastEntry? = nil, lastMessageAuthorId: String? = nil, lastMessageId: String? = nil, lastMessagePreview: String? = nil, lastMessagePreviewSource: SandAgentSummaryLastMessagePreviewSource? = nil, lastViewedAt: Double? = nil, memberIds: [String], name: String, newestEntryId: String? = nil, notificationsEnabled: Bool, notifyOnUpdatesEnabled: Bool, origin: SandAgentOrigin, path: String, purpose: SandAgentSummaryPurpose? = nil, pushMessageContent: SandPushMessageContentPayload? = nil, remoteMembers: [SandAgentSummaryRemoteMembersItem]? = nil, remoteRoom: SandAgentSummaryRemoteRoom? = nil, serverId: String? = nil, sharedRoomId: String? = nil, slackConnected: Bool? = nil, snapshotEpoch: String? = nil, snapshotSeq: Double? = nil, teamId: Double? = nil, title: String? = nil, unreadCount: Double? = nil, updatedAt: Double, viewerIsOwner: Bool? = nil, visibility: SandAgentSummaryVisibility? = nil) {
 		self.activeRemoteMemberId = activeRemoteMemberId
 		self.avatarColor = avatarColor
 		self.avatarDataUrl = avatarDataUrl
@@ -2297,6 +2627,13 @@ public struct SandCreateAgentResult: Codable {
 	public let transcript: [SandTranscriptEntry]
 	public init(agent: SandAgentSummary, transcript: [SandTranscriptEntry]) {
 		self.agent = agent
+		self.transcript = transcript
+	}
+}
+
+public struct SandDeleteAgentResult: Codable {
+	public let transcript: [SandTranscriptEntry]
+	public init(transcript: [SandTranscriptEntry]) {
 		self.transcript = transcript
 	}
 }
@@ -4979,6 +5316,13 @@ public struct SandWidget: Codable {
 	}
 }
 
+public struct SandWidgetAnswerResult: Codable {
+	public let accepted: Bool
+	public init(accepted: Bool) {
+		self.accepted = accepted
+	}
+}
+
 public struct SandWidgetCopyKind: RawRepresentable, Codable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
@@ -4987,6 +5331,8 @@ public struct SandWidgetCopyKind: RawRepresentable, Codable, Equatable, Hashable
 }
 
 public typealias ArgsCreateAgent = SandCreateAgentArgs
+
+public typealias ArgsDismissWidget = ArgsDiscardDraft
 
 public typealias ArgsGetAgentAvatar = SandAsyncTaskLabelParams
 
@@ -5015,6 +5361,14 @@ public typealias ArgsSendPrompt = SandSendPromptArgs
 public typealias ArgsUploadAttachment = SandUploadAttachmentArgs
 
 public typealias ReplyCreateAgent = SandCreateAgentResult
+
+public typealias ReplyCreateGroup = SandCreateAgentResult
+
+public typealias ReplyDeleteAgents = SandDeleteAgentResult
+
+public typealias ReplyDismissUserForm = BotRelayJSONValue
+
+public typealias ReplyDismissWidget = SandWidgetAnswerResult
 
 public typealias ReplyGetAgentAvatar = SandAgentAvatarResult
 
@@ -5046,11 +5400,19 @@ public typealias ReplyReadAttachmentText = ReplyReadAttachmentTextValue?
 
 public typealias ReplyReadVoiceCallAgentContext = SandVoiceCallAgentContext
 
+public typealias ReplyRespondToWidget = SandWidgetAnswerResult?
+
 public typealias ReplySearchMedia = [SandMediaMatch]
 
 public typealias ReplySendPrompt = SandSendPromptResult?
 
 public typealias ReplySetAgentUnread = BotRelayJSONValue
+
+public typealias ReplySetGroupMembers = SandAgentSummary?
+
+public typealias ReplySubmitUserForm = BotRelayJSONValue
+
+public typealias ReplyUpdateAgent = SandAgentSummary?
 
 public typealias ReplyUploadAttachment = SandUploadAttachmentResult
 
@@ -5080,6 +5442,10 @@ public typealias ReplyAttachUpload = SandUploadAttachmentResult
 public let V1_COMMAND_ALLOWLIST: [String] = [
 	"attachUpload",
 	"createAgent",
+	"createGroup",
+	"deleteAgents",
+	"dismissUserForm",
+	"dismissWidget",
 	"getAgentAvatar",
 	"getAgentThread",
 	"getAgentTranscript",
@@ -5087,6 +5453,7 @@ public let V1_COMMAND_ALLOWLIST: [String] = [
 	"getAgentTranscriptTail",
 	"getAgentTranscriptWindow",
 	"getSubagents",
+	"injectChromeCookies",
 	"interruptAgentRun",
 	"listAgents",
 	"promptAcceptanceStatus",
@@ -5095,8 +5462,12 @@ public let V1_COMMAND_ALLOWLIST: [String] = [
 	"readAttachmentImage",
 	"readAttachmentText",
 	"readVoiceCallAgentContext",
+	"respondToWidget",
 	"sendPrompt",
 	"setAgentUnread",
+	"setGroupMembers",
+	"submitUserForm",
+	"updateAgent",
 	"uploadAttachment",
 ]
 
@@ -5105,6 +5476,10 @@ public enum BotCommand: Codable {
 
 	case attachUpload(AttachUpload)
 	case createAgent(CreateAgent)
+	case createGroup(CreateGroup)
+	case deleteAgents(DeleteAgents)
+	case dismissUserForm(DismissUserForm)
+	case dismissWidget(DismissWidget)
 	case getAgentAvatar(GetAgentAvatar)
 	case getAgentThread(GetAgentThread)
 	case getAgentTranscript(GetAgentTranscript)
@@ -5112,6 +5487,7 @@ public enum BotCommand: Codable {
 	case getAgentTranscriptTail(GetAgentTranscriptTail)
 	case getAgentTranscriptWindow(GetAgentTranscriptWindow)
 	case getSubagents(GetSubagents)
+	case injectChromeCookies(InjectChromeCookies)
 	case interruptAgentRun(InterruptAgentRun)
 	case listAgents(ListAgents)
 	case promptAcceptanceStatus(PromptAcceptanceStatus)
@@ -5120,8 +5496,12 @@ public enum BotCommand: Codable {
 	case readAttachmentImage(ReadAttachmentImage)
 	case readAttachmentText(ReadAttachmentText)
 	case readVoiceCallAgentContext(ReadVoiceCallAgentContext)
+	case respondToWidget(RespondToWidget)
 	case sendPrompt(SendPrompt)
 	case setAgentUnread(SetAgentUnread)
+	case setGroupMembers(SetGroupMembers)
+	case submitUserForm(SubmitUserForm)
+	case updateAgent(UpdateAgent)
 	case uploadAttachment(UploadAttachment)
 
 	public struct AttachUpload: Codable {
@@ -5140,6 +5520,50 @@ public enum BotCommand: Codable {
 		public var name: String
 		public var args: SandCreateAgentArgs
 		public init(agentId: String, args: SandCreateAgentArgs, name: String = "createAgent") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CreateGroup: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsCreateGroup
+		public init(agentId: String, args: ArgsCreateGroup, name: String = "createGroup") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DeleteAgents: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsDeleteAgents
+		public init(agentId: String, args: ArgsDeleteAgents, name: String = "deleteAgents") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DismissUserForm: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsDismissUserForm
+		public init(agentId: String, args: ArgsDismissUserForm, name: String = "dismissUserForm") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DismissWidget: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsDiscardDraft
+		public init(agentId: String, args: ArgsDiscardDraft, name: String = "dismissWidget") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -5217,6 +5641,17 @@ public enum BotCommand: Codable {
 		public var name: String
 		public var args: SandAsyncTaskLabelParams
 		public init(agentId: String, args: SandAsyncTaskLabelParams, name: String = "getSubagents") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct InjectChromeCookies: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsInjectChromeCookies
+		public init(agentId: String, args: ArgsInjectChromeCookies, name: String = "injectChromeCookies") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -5311,6 +5746,17 @@ public enum BotCommand: Codable {
 		}
 	}
 
+	public struct RespondToWidget: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsRespondToWidget
+		public init(agentId: String, args: ArgsRespondToWidget, name: String = "respondToWidget") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct SendPrompt: Codable {
 		public var agentId: String
 		public var name: String
@@ -5327,6 +5773,39 @@ public enum BotCommand: Codable {
 		public var name: String
 		public var args: ArgsSetAgentUnread
 		public init(agentId: String, args: ArgsSetAgentUnread, name: String = "setAgentUnread") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SetGroupMembers: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsSetGroupMembers
+		public init(agentId: String, args: ArgsSetGroupMembers, name: String = "setGroupMembers") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SubmitUserForm: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsSubmitUserForm
+		public init(agentId: String, args: ArgsSubmitUserForm, name: String = "submitUserForm") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct UpdateAgent: Codable {
+		public var agentId: String
+		public var name: String
+		public var args: ArgsUpdateAgent
+		public init(agentId: String, args: ArgsUpdateAgent, name: String = "updateAgent") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -5351,6 +5830,10 @@ public enum BotCommand: Codable {
 		switch try container.decode(String.self, forKey: .name) {
 		case "attachUpload": self = .attachUpload(try AttachUpload(from: decoder))
 		case "createAgent": self = .createAgent(try CreateAgent(from: decoder))
+		case "createGroup": self = .createGroup(try CreateGroup(from: decoder))
+		case "deleteAgents": self = .deleteAgents(try DeleteAgents(from: decoder))
+		case "dismissUserForm": self = .dismissUserForm(try DismissUserForm(from: decoder))
+		case "dismissWidget": self = .dismissWidget(try DismissWidget(from: decoder))
 		case "getAgentAvatar": self = .getAgentAvatar(try GetAgentAvatar(from: decoder))
 		case "getAgentThread": self = .getAgentThread(try GetAgentThread(from: decoder))
 		case "getAgentTranscript": self = .getAgentTranscript(try GetAgentTranscript(from: decoder))
@@ -5358,6 +5841,7 @@ public enum BotCommand: Codable {
 		case "getAgentTranscriptTail": self = .getAgentTranscriptTail(try GetAgentTranscriptTail(from: decoder))
 		case "getAgentTranscriptWindow": self = .getAgentTranscriptWindow(try GetAgentTranscriptWindow(from: decoder))
 		case "getSubagents": self = .getSubagents(try GetSubagents(from: decoder))
+		case "injectChromeCookies": self = .injectChromeCookies(try InjectChromeCookies(from: decoder))
 		case "interruptAgentRun": self = .interruptAgentRun(try InterruptAgentRun(from: decoder))
 		case "listAgents": self = .listAgents(try ListAgents(from: decoder))
 		case "promptAcceptanceStatus": self = .promptAcceptanceStatus(try PromptAcceptanceStatus(from: decoder))
@@ -5366,8 +5850,12 @@ public enum BotCommand: Codable {
 		case "readAttachmentImage": self = .readAttachmentImage(try ReadAttachmentImage(from: decoder))
 		case "readAttachmentText": self = .readAttachmentText(try ReadAttachmentText(from: decoder))
 		case "readVoiceCallAgentContext": self = .readVoiceCallAgentContext(try ReadVoiceCallAgentContext(from: decoder))
+		case "respondToWidget": self = .respondToWidget(try RespondToWidget(from: decoder))
 		case "sendPrompt": self = .sendPrompt(try SendPrompt(from: decoder))
 		case "setAgentUnread": self = .setAgentUnread(try SetAgentUnread(from: decoder))
+		case "setGroupMembers": self = .setGroupMembers(try SetGroupMembers(from: decoder))
+		case "submitUserForm": self = .submitUserForm(try SubmitUserForm(from: decoder))
+		case "updateAgent": self = .updateAgent(try UpdateAgent(from: decoder))
 		case "uploadAttachment": self = .uploadAttachment(try UploadAttachment(from: decoder))
 		default:
 			throw DecodingError.dataCorruptedError(
@@ -5381,6 +5869,10 @@ public enum BotCommand: Codable {
 		switch self {
 		case .attachUpload(let v): try v.encode(to: encoder)
 		case .createAgent(let v): try v.encode(to: encoder)
+		case .createGroup(let v): try v.encode(to: encoder)
+		case .deleteAgents(let v): try v.encode(to: encoder)
+		case .dismissUserForm(let v): try v.encode(to: encoder)
+		case .dismissWidget(let v): try v.encode(to: encoder)
 		case .getAgentAvatar(let v): try v.encode(to: encoder)
 		case .getAgentThread(let v): try v.encode(to: encoder)
 		case .getAgentTranscript(let v): try v.encode(to: encoder)
@@ -5388,6 +5880,7 @@ public enum BotCommand: Codable {
 		case .getAgentTranscriptTail(let v): try v.encode(to: encoder)
 		case .getAgentTranscriptWindow(let v): try v.encode(to: encoder)
 		case .getSubagents(let v): try v.encode(to: encoder)
+		case .injectChromeCookies(let v): try v.encode(to: encoder)
 		case .interruptAgentRun(let v): try v.encode(to: encoder)
 		case .listAgents(let v): try v.encode(to: encoder)
 		case .promptAcceptanceStatus(let v): try v.encode(to: encoder)
@@ -5396,8 +5889,12 @@ public enum BotCommand: Codable {
 		case .readAttachmentImage(let v): try v.encode(to: encoder)
 		case .readAttachmentText(let v): try v.encode(to: encoder)
 		case .readVoiceCallAgentContext(let v): try v.encode(to: encoder)
+		case .respondToWidget(let v): try v.encode(to: encoder)
 		case .sendPrompt(let v): try v.encode(to: encoder)
 		case .setAgentUnread(let v): try v.encode(to: encoder)
+		case .setGroupMembers(let v): try v.encode(to: encoder)
+		case .submitUserForm(let v): try v.encode(to: encoder)
+		case .updateAgent(let v): try v.encode(to: encoder)
 		case .uploadAttachment(let v): try v.encode(to: encoder)
 		}
 	}
@@ -5407,6 +5904,10 @@ public enum BotCommand: Codable {
 public enum BotCommandReplyByName {
 	public typealias AttachUpload = SandUploadAttachmentResult
 	public typealias CreateAgent = SandCreateAgentResult
+	public typealias CreateGroup = SandCreateAgentResult
+	public typealias DeleteAgents = SandDeleteAgentResult
+	public typealias DismissUserForm = BotRelayJSONValue
+	public typealias DismissWidget = SandWidgetAnswerResult
 	public typealias GetAgentAvatar = SandAgentAvatarResult
 	public typealias GetAgentThread = SandAgentThread
 	public typealias GetAgentTranscript = [SandTranscriptEntry]
@@ -5414,6 +5915,7 @@ public enum BotCommandReplyByName {
 	public typealias GetAgentTranscriptTail = SandTranscriptPage
 	public typealias GetAgentTranscriptWindow = SandTranscriptWindow
 	public typealias GetSubagents = [SandSubagentInfo]
+	public typealias InjectChromeCookies = ReplyInjectChromeCookies
 	public typealias InterruptAgentRun = SandInterruptAgentRunResult
 	public typealias ListAgents = [SandAgentSummary]
 	public typealias PromptAcceptanceStatus = PromptAcceptanceLookup
@@ -5422,7 +5924,11 @@ public enum BotCommandReplyByName {
 	public typealias ReadAttachmentImage = ResolvedImageAttachment?
 	public typealias ReadAttachmentText = ReplyReadAttachmentTextValue?
 	public typealias ReadVoiceCallAgentContext = SandVoiceCallAgentContext
+	public typealias RespondToWidget = SandWidgetAnswerResult?
 	public typealias SendPrompt = SandSendPromptResult?
 	public typealias SetAgentUnread = BotRelayJSONValue
+	public typealias SetGroupMembers = SandAgentSummary?
+	public typealias SubmitUserForm = BotRelayJSONValue
+	public typealias UpdateAgent = SandAgentSummary?
 	public typealias UploadAttachment = SandUploadAttachmentResult
 }

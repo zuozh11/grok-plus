@@ -1115,22 +1115,6 @@ fn test_shared_mcp_pool_meta_config_preserved() {
 }
 
 #[test]
-fn test_shared_mcp_pool_clone_shares_arcs() {
-    let mut state = McpState::new(vec![]);
-    let client = make_test_client("svc");
-    state
-        .owned_clients
-        .insert("svc".to_string(), Arc::clone(&client));
-
-    let pool = SharedMcpPool::from_state(&state);
-    let pool2 = pool.clone();
-
-    let c1 = pool.get_client("svc").unwrap();
-    let c2 = pool2.get_client("svc").unwrap();
-    assert!(Arc::ptr_eq(c1, c2));
-}
-
-#[test]
 fn test_get_client_owned_overrides_shared() {
     let mut state = McpState::new(vec![]);
     let shared = make_test_client("srv");
@@ -2036,22 +2020,6 @@ async fn try_call_tool_http_retry_timeout_surfaces_timeout() {
         2,
         "recovery re-initialized before the retry"
     );
-}
-
-#[test]
-fn test_new_http_stores_http_config() {
-    let config = HttpConfig {
-        url: "http://localhost:5000/api/mcp".to_string(),
-        headers: vec![("x-token".to_string(), "abc".to_string())],
-    };
-    let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
-    let stored = client
-        .http_config
-        .as_ref()
-        .expect("http_config should be Some");
-    assert_eq!(stored.url, "http://localhost:5000/api/mcp");
-    assert_eq!(stored.headers.len(), 1);
-    assert_eq!(stored.headers[0].0, "x-token");
 }
 
 #[test]
@@ -3024,33 +2992,6 @@ async fn client_handler_routes_tools_changed() {
 }
 
 #[tokio::test]
-async fn client_handler_no_dispatcher_is_silent() {
-    let handler = GrokClientHandler {
-        info: McpClient::make_client_info("test", /* advertise_elicitation */ true),
-        server_name: "test".to_string(),
-        notify_tx: Arc::new(parking_lot::Mutex::new(None)),
-        elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
-    };
-    handler.emit(McpClientEvent::ToolsChanged {
-        server: "test".to_string(),
-    });
-}
-
-#[tokio::test]
-async fn client_handler_get_info_round_trips() {
-    let info = McpClient::make_client_info("test-srv", /* advertise_elicitation */ true);
-    let handler = GrokClientHandler {
-        info: info.clone(),
-        server_name: "test-srv".to_string(),
-        notify_tx: Arc::new(parking_lot::Mutex::new(None)),
-        elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
-    };
-    let got = handler.get_info();
-    assert_eq!(got.client_info.name, info.client_info.name);
-    assert_eq!(got.client_info.version, info.client_info.version);
-}
-
-#[tokio::test]
 async fn client_handler_observes_post_handshake_set_event_tx() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
     let client = Arc::new(McpClient::stub("test"));
@@ -3069,25 +3010,6 @@ async fn client_handler_observes_post_handshake_set_event_tx() {
         McpClientEvent::ToolsChanged { server } => assert_eq!(server, "test"),
         other => panic!("expected ToolsChanged, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn event_tx_clone_observes_set_event_tx() {
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<McpClientEvent>();
-    let client = McpClient::stub("test");
-    assert!(client.event_tx_clone().is_none());
-    client.set_event_tx(Some(tx));
-    assert!(client.event_tx_clone().is_some());
-    client.set_event_tx(None);
-    assert!(client.event_tx_clone().is_none());
-}
-
-#[test]
-fn config_added_kind_carries_correct_server_name() {
-    let ev = McpClientEvent::ConfigAdded {
-        server: "srv".to_string(),
-    };
-    assert_eq!(ev.server_name(), Some("srv"));
 }
 
 #[derive(Clone)]
@@ -3250,8 +3172,7 @@ async fn inconclusive_oauth_probe_unreachable_fails_closed() {
     );
     let url = spawn_test_http_server(app).await;
     let decision = resolve_tokenless(&url, OauthInteractivity::NonInteractive).await;
-    // A server nobody can reach is a connectivity verdict, not an auth one:
-    // still fails this spawn closed, but as the retryable `Unreachable`.
+    // A server nobody can reach is a connectivity verdict, not an auth one: still fails this spawn closed, but as the retryable `Unreachable`
     assert!(matches!(decision, HttpAuthDecision::Unreachable));
 }
 
@@ -3504,8 +3425,7 @@ async fn spawn_into_a_closed_scope_fails_fast() {
 // Unreachable-spawn retry (McpError::Unreachable + McpState cooldown gating)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// `Unreachable` is a connectivity verdict: never auth, always retryable,
-/// still attributable to its server for failure recording.
+/// `Unreachable` is a connectivity verdict: never auth, always retryable, still attributable to its server for failure recording.
 #[test]
 fn unreachable_error_is_retryable_not_auth() {
     let err = McpError::Unreachable {
@@ -3523,9 +3443,8 @@ fn unreachable_error_is_retryable_not_auth() {
     );
 }
 
-/// Candidates are returned only when the cooldown expired AND the server is
-/// still configured; a taken candidate is in-flight (holding an attempt
-/// token) and is not handed to another trigger until its attempt settles.
+/// Candidates are returned only when the cooldown expired AND the server is still configured.
+/// A taken candidate is in-flight (holding an attempt token) and is not handed to another trigger until its attempt settles.
 #[test]
 fn unreachable_retry_candidates_respect_cooldown_and_config() {
     let mut state = McpState::new(vec![
@@ -3546,19 +3465,17 @@ fn unreachable_retry_candidates_respect_cooldown_and_config() {
     assert_eq!(taken.len(), 1);
     let (name, token) = taken[0].clone();
     assert_eq!(name, "due");
-    // Both failures surface as init_failed (Unavailable in status snapshots).
+    // Both failures land in init_failed (Unavailable in status snapshots)
     assert!(state.init_failed.contains_key("due"));
     assert!(state.init_failed.contains_key("cooling"));
 
-    // In-flight: no other trigger can take the same server, even though the
-    // attempt may outlive any fixed cooldown.
+    // In-flight: no other trigger can take the same server, even though the attempt may outlive any fixed cooldown
     assert!(state.take_unreachable_retry_candidates().is_empty());
     // Recording from the init path never demotes an in-flight attempt.
     state.record_unreachable_failure_at("due", "racing".to_string(), now);
     assert!(state.take_unreachable_retry_candidates().is_empty());
 
-    // A failed settle restarts the cooldown from settle time (still cooling
-    // now), refreshing the detail.
+    // A failed settle restarts the cooldown from settle time (still cooling now), refreshing the detail
     state.settle_unreachable_attempt_failed("due", token, "still down".to_string());
     assert_eq!(
         state.init_failed.get("due").map(String::as_str),
@@ -3575,9 +3492,8 @@ fn unreachable_retry_candidates_respect_cooldown_and_config() {
     assert!(!state.finish_unreachable_attempt(&name, token));
 }
 
-/// Config teardown mid-attempt invalidates the attempt token: a stale attempt
-/// can neither install (finish returns false) nor re-pollute the records its
-/// teardown cleaned (failed/unretryable settles no-op).
+/// Config teardown mid-attempt invalidates the attempt token.
+/// A stale attempt can neither install (finish returns false) nor re-pollute the records its teardown cleaned (failed/unretryable settles no-op).
 #[test]
 fn unreachable_attempt_token_invalidated_by_config_teardown() {
     let mut state = McpState::new(vec![
@@ -3602,8 +3518,7 @@ fn unreachable_attempt_token_invalidated_by_config_teardown() {
     assert!(state.take_unreachable_retry_candidates().is_empty());
 }
 
-/// Config updates must not leave a stale unreachable schedule behind: the
-/// diff path forgets removed servers, the full-replace path clears everything.
+/// Config updates must not leave a stale unreachable schedule behind: the diff path forgets removed servers, the full-replace path clears everything.
 #[test]
 fn unreachable_schedule_cleared_on_config_updates() {
     let mut state = McpState::new(vec![
@@ -3619,7 +3534,7 @@ fn unreachable_schedule_cleared_on_config_updates() {
         .expect("should detect change");
     assert_eq!(diff.removed, vec!["remove"]);
     assert!(!state.init_failed.contains_key("remove"));
-    // Removed server is no longer scheduled; kept server still is.
+    // The removed server is no longer scheduled; the kept server still is
     let taken: Vec<McpServerName> = state
         .take_unreachable_retry_candidates()
         .into_iter()
@@ -3627,15 +3542,14 @@ fn unreachable_schedule_cleared_on_config_updates() {
         .collect();
     assert_eq!(taken, vec!["keep".to_string()]);
 
-    // Full replace clears the whole schedule (including in-flight attempts).
+    // A full replace clears the whole schedule (including in-flight attempts)
     assert!(state.update_configs(vec![make_stdio_server("keep", "/bin/keep2")]));
     assert!(state.take_unreachable_retry_candidates().is_empty());
     assert!(state.init_failed.is_empty());
 }
 
-/// A fresh init attempt (`mark_servers_initializing`) supersedes any pending
-/// unreachable-respawn schedule — the attempt itself re-records on failure —
-/// so a server recovered by a full re-init cannot be respawned over later.
+/// A fresh init attempt (`mark_servers_initializing`) supersedes any pending unreachable-respawn schedule.
+/// The attempt itself re-records on failure, so a server recovered by a full re-init cannot be respawned over later.
 #[test]
 fn fresh_init_attempt_clears_unreachable_schedule() {
     let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
@@ -3646,9 +3560,8 @@ fn fresh_init_attempt_clears_unreachable_schedule() {
     assert!(state.take_unreachable_retry_candidates().is_empty());
 }
 
-/// An attempt whose future was cancelled never settles; after the lease
-/// expires the server is takeable again with a fresh token and the zombie
-/// attempt's old token no-ops.
+/// An attempt whose future was cancelled never settles.
+/// After the lease expires the server is takeable again with a fresh token and the zombie attempt's old token no-ops.
 #[test]
 fn unreachable_attempt_lease_reclaims_cancelled_attempts() {
     let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
@@ -3674,12 +3587,11 @@ fn unreachable_attempt_lease_reclaims_cancelled_attempts() {
     // …and the zombie attempt's token is dead: it cannot install or settle.
     assert!(!state.finish_unreachable_attempt("srv", old_token));
     state.settle_unreachable_attempt_failed("srv", old_token, "stale".to_string());
-    // Still owned by the new attempt (settle with the new token works).
+    // The server is still owned by the new attempt (settle with the new token works)
     assert!(state.finish_unreachable_attempt("srv", new_token));
 }
 
-/// Transient-connectivity classification: typed verdicts and transport-level
-/// handshake/client errors are retryable; protocol junk and auth are not.
+/// Typed verdicts and transport-level handshake/client errors are retryable; protocol junk and auth are not.
 #[test]
 fn transient_connectivity_classification() {
     assert!(

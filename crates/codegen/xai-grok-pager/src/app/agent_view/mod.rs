@@ -934,6 +934,18 @@ pub struct AgentView {
     /// The wake turn currently streaming, if any. See [`RunningWakeTurn`].
     pub(crate) running_wake_turn: Option<RunningWakeTurn>,
     pub active_pane: AgentPane,
+    /// Cursor over the dock's visible items (headers + rows).
+    pub dock_cursor: usize,
+    pub dock_subagents_expanded: bool,
+    pub dock_tasks_expanded: bool,
+    pub dock_watchers_expanded: bool,
+    /// Sticky: render enforces the queue overlay's visibility from this each
+    /// frame, so the queue's auto-show can't re-open a manual collapse.
+    pub dock_queued_expanded: bool,
+    /// Set each render: dock enabled, terminal tall enough, ≥1 non-empty
+    /// section. Key handling reads it so `Ctrl+G` only focuses the dock when it
+    /// exists (and short terminals fall back to the tasks pane).
+    pub dock_shown: bool,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
     /// Current special prompt input mode (Normal/Bash/Remember).
@@ -968,8 +980,8 @@ pub struct AgentView {
     /// Set by the send that consumed the user's draft this dispatch; see `note_draft_consumed`.
     pub(crate) draft_consumed: bool,
     /// Complete prompt stashed from a credit-limit-blocked turn. Used by
-    /// `CreditLimitRecheckComplete` to retry the prompt after a tier
-    /// upgrade instead of showing a stale upsell.
+    /// `CreditLimitRecheckComplete` to retry after a tier upgrade, and by
+    /// the upsell's Try Again option.
     pub credit_limit_stashed_prompt: Option<crate::app::agent::InFlightPrompt>,
     /// Complete prompt stashed from a turn that failed because the login
     /// expired (401 / re-auth). Used by the `AuthComplete` handler to
@@ -1317,6 +1329,9 @@ pub struct AgentView {
     /// be smaller than the terminal (dashboard overlay header band/popup,
     /// dev tracing split). Only `note_terminal_size` (draw) writes it.
     pub(crate) last_terminal_size: (u16, u16),
+    /// When the last `Event::Resize` arrived. Drives the iTerm2 preview
+    /// quiet window — see [`Self::resize_hides_prompt_preview`].
+    pub(crate) last_resize_at: Option<std::time::Instant>,
     /// Set on every `Event::Resize` (see `AppView::handle_input`), cleared
     /// by the next draw's re-measure. While set, `last_terminal_size` is
     /// known-invalidated and the ephemeral-tip show gate refuses, so a
@@ -1881,11 +1896,19 @@ fn translate_local_submit(
             })
         }
         LocalQuestionKind::CreditLimitUpsell { choices } => {
-            let q = qv.questions.first();
-            let url = q
-                .and_then(|q| q.options.get(*idx))
-                .and_then(|o| o.id.as_deref())
-                .unwrap_or(super::dispatch::UPSELL_URL_PAYG);
+            let option = qv.questions.first().and_then(|q| q.options.get(*idx));
+            let id = option.and_then(|o| o.id.as_deref());
+            if id == Some(super::dispatch::CREDIT_LIMIT_RETRY_OPTION_ID) {
+                xai_grok_telemetry::session_ctx::log_event(
+                    xai_grok_telemetry::events::CreditLimitUpsellClicked {
+                        surface:
+                            xai_grok_telemetry::events::CreditLimitUpsellSurface::QuestionModal,
+                        choice: xai_grok_telemetry::events::CreditLimitChoice::RetryLastPrompt,
+                    },
+                );
+                return InputOutcome::Action(Action::RetryCreditLimitPrompt);
+            }
+            let url = id.unwrap_or(super::dispatch::UPSELL_URL_PAYG);
             let choice = choices
                 .get(*idx)
                 .copied()

@@ -4263,7 +4263,7 @@ impl AppView {
         agents: &mut IndexMap<AgentId, AgentView>,
         drawn_agent: Option<AgentId>,
     ) -> Option<crate::terminal::overlay::PostFlush> {
-        if crate::terminal::image::detect_graphics_protocol()
+        if crate::terminal::image::prompt_preview_graphics_protocol()
             == crate::terminal::image::GraphicsProtocol::None
         {
             return None;
@@ -4279,8 +4279,11 @@ impl AppView {
                 has_escapes = true;
             }
         }
-        if drawn_agent.is_none() {
-            clears.append(crate::terminal::overlay::clear_kitty().into());
+        if drawn_agent.is_none()
+            && let Some(clear) = crate::terminal::overlay::clear()
+            && (!clear.as_str().is_empty() || crate::terminal::overlay::has_committed_owner())
+        {
+            clears.append(clear.into());
             has_escapes = true;
         }
         has_escapes.then_some(clears)
@@ -5399,6 +5402,7 @@ impl AppView {
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();
             needs_redraw |= agent.tasks.tick();
+            needs_redraw |= agent.resize_preview_needs_tick();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
                 needs_redraw |= child_view.tick_toast();
@@ -5729,6 +5733,7 @@ impl AppView {
                 let fast = agent.scrollback.needs_animation()
                     || agent.todo.list_state.needs_tick()
                     || agent.tasks.needs_tick()
+                    || agent.resize_preview_needs_tick()
                     || agent.acp_synced_generation != agent.session.available_commands_generation
                     || !agent.session.state.is_idle()
                     || agent.wake_turn_active()

@@ -88,6 +88,10 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         app.sync_permission_mode_slash_gate();
     }
 
+    if let Some(v) = update.prompt_suggestions_enabled {
+        xai_grok_shell::util::config::cache_remote_prompt_suggestions_enabled(Some(v));
+    }
+
     // `permission_mode` is presence-aware (omit / null / string)
     // While the soft default still owns the mode, a push refreshes `default_yolo` and the UI for the next `/new`
     // Once the user claims a mode (Shift+Tab, settings, `/mode`) the latch is cleared and pushes leave it alone
@@ -531,6 +535,8 @@ pub(super) struct PagerSettingsUpdate {
     subscription_tier_display: Option<String>,
     #[serde(default)]
     auto_permission_mode_enabled: Option<bool>,
+    #[serde(default)]
+    prompt_suggestions_enabled: Option<bool>,
     /// Soft-default permission mode.
     /// Presence-aware: omit means no update, `null` means recompute with no remote value, and a string is that soft-default.
     /// Omission happens with older shells that predate the field (they can never clear a mode they don't know about).

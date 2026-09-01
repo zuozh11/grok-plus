@@ -3,9 +3,7 @@ use super::*;
 use tokio::sync::mpsc;
 /// Test that `last_api_request_at` is recorded and used for idle detection.
 ///
-/// The `maybe_refresh_model_metadata_on_resume` method checks this timestamp
-/// to decide whether to proactively refresh model metadata from cli-chat-proxy.
-/// This test verifies the timestamp recording and idle detection logic.
+/// `maybe_refresh_model_metadata_on_resume` checks this timestamp to decide whether to proactively refresh model metadata from cli-chat-proxy.
 #[tokio::test(flavor = "current_thread")]
 async fn test_last_api_request_at_idle_detection() {
     let local = tokio::task::LocalSet::new();
@@ -42,9 +40,8 @@ async fn test_last_api_request_at_idle_detection() {
 }
 /// End-to-end test for `maybe_refresh_model_metadata_on_resume`.
 ///
-/// Simulates a session idle for >10 minutes, then verifies the function
-/// fetches `/models-v2`, parses the response, and updates `context_window`
-/// and `max_completion_tokens` in the sampling config.
+/// Simulates a session idle for more than 10 minutes, then verifies the function fetches `/models-v2` and parses the response.
+/// The refresh must update `context_window` and `max_completion_tokens` in the sampling config.
 #[tokio::test(flavor = "current_thread")]
 async fn test_e2e_idle_resume_refreshes_model_metadata() {
     use axum::routing::get;
@@ -91,6 +88,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ToolContext::new(cwd.clone(), None, None, fs, terminal, hunk_tracker_handle);
             let state = TokioMutex::new(State {
                 running_task: None,
+                finalization_gate: Default::default(),
                 pending_inputs: VecDeque::new(),
                 edit_holds: HashMap::new(),
                 pending_notifications: Vec::new(),
@@ -130,6 +128,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                repo_status_prefetch:
+                    crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
                 transient_retries_prompt_total: std::cell::Cell::new(0),
                 transient_episode_start: std::cell::Cell::new(None),
@@ -375,7 +375,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
         })
         .await;
 }
-/// Verify `maybe_refresh_model_metadata_on_resume` is a no-op when idle < 10 min.
+/// Verify `maybe_refresh_model_metadata_on_resume` is a no-op when idle is under 10 minutes.
 #[tokio::test(flavor = "current_thread")]
 async fn test_idle_resume_noop_when_not_idle_enough() {
     let local = tokio::task::LocalSet::new();

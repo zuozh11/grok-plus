@@ -385,6 +385,12 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
+    // Redundant when the dock is actually on screen (its Queued section shows
+    // the state); `dock_shown` also handles short terminals, where the dock is
+    // hidden but the real queue pane is shown, so the tip should still appear.
+    if agent.dock_shown {
+        return;
+    }
     // Impression only when the tip actually takes the slot (mirrors undo/plan).
     if agent.show_ephemeral_tip(
         crate::tips::send_now::send_now_tip(),
@@ -722,6 +728,7 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         // Reaching here means the command queued or passed text through, a real submission
         // Local-UI commands returned above and must keep the hook-block hold
+        agent.credit_limit_stashed_prompt = None;
         agent.release_hook_block_hold();
         if consume_input {
             // Drain prompt images before clearing prompt state.
@@ -835,6 +842,7 @@ pub(super) fn dispatch_send_prompt_inner(
             // This immediate-send path returns early, so it must clear them here too (notably a chip click, which submits while a turn is running)
             // `clear_follow_ups` keeps `follow_up_seen` (it marks the turn boundary) so a stale re-delivery stays rejected
             agent.clear_follow_ups();
+            agent.credit_limit_stashed_prompt = None;
 
             // `agent` borrow ends here; push the optimistic echo via `app`.
             let sid_str = session_id.0.to_string();
@@ -878,6 +886,7 @@ pub(super) fn dispatch_send_prompt_inner(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
+        agent.credit_limit_stashed_prompt = None;
         if consume_input {
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
@@ -1249,8 +1258,8 @@ pub(super) fn handle_prompt_response(
 
         // Stash the complete in-flight prompt before finish_turn clears it.
         // Used by CreditLimitRecheckComplete to retry after a tier upgrade.
-        if credit_limit_blocked {
-            agent.credit_limit_stashed_prompt = agent.session.in_flight_prompt.clone();
+        if credit_limit_blocked && let Some(prompt) = agent.session.in_flight_prompt.clone() {
+            agent.credit_limit_stashed_prompt = Some(prompt);
         }
         // Stash for AuthComplete after 401
         // Prefer in_flight; fall back to compact_held (cleared for cancel-rewind during auto-compact)
@@ -1519,7 +1528,7 @@ pub(super) fn handle_prompt_response(
             && let Some(session_id) = agent.session.session_id.as_ref().map(|s| s.0.to_string())
         {
             let generation = agent.prompt.prompt_suggestion.begin_fetch();
-            let model = crate::views::prompt_suggestion::resolve_model(&agent.session.models);
+            let model = crate::views::prompt_suggestion::resolve_model();
             effects.push(Effect::FetchPromptSuggestion {
                 agent_id,
                 generation,

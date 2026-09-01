@@ -1,5 +1,4 @@
-//! Memory concern for `SessionActor`: memory flush, the dream pipeline,
-//! memory tool registration, and note rewriting.
+//! Memory concern for `SessionActor`: memory flush, the dream pipeline, memory tool registration, and note rewriting.
 
 use super::*;
 use xai_grok_telemetry::session_end::{self, Phase};
@@ -10,14 +9,10 @@ pub(super) struct MemoryFlushSnapshot {
     chat_history: Vec<ConversationItem>,
 }
 
-/// Build first-turn injection backend params without mutating the shared
-/// session params.
+/// Build first-turn injection backend params without mutating the shared session params.
 ///
-/// This clones the session-wide backend params so tool-search and
-/// compaction-recovery backends keep their original `search_source` and search
-/// thresholds. The returned effective min score preserves the historical
-/// first-turn default of `0.0` unless the injection config explicitly
-/// overrides it.
+/// Clones the session-wide params so tool-search and compaction-recovery backends keep their original `search_source` and search thresholds.
+/// The returned effective min score keeps the historical first-turn default of `0.0` unless the injection config explicitly overrides it.
 pub(super) fn build_initial_injection_backend_params(
     params: &crate::session::memory::MemoryBackendParams,
     initial_injection_config: &crate::config::MemoryInitialInjectionConfig,
@@ -37,10 +32,9 @@ pub(super) fn build_initial_injection_backend_params(
 impl SessionActor {
     /// Re-register `memory_search` and `memory_get` tools on the tool bridge.
     ///
-    /// Used when re-enabling memory mid-session (`/memory on`). The tools are
-    /// registered via the dynamic `register_mcp_tools` path which puts them in
-    /// the `LocalRegistry` for dispatch. The memory backend itself is already
-    /// in `Resources` (inserted by the caller before calling this method).
+    /// Used when re-enabling memory mid-session (`/memory on`).
+    /// The dynamic `register_mcp_tools` path puts the tools in the `LocalRegistry` for dispatch.
+    /// The memory backend itself is already in `Resources`, inserted by the caller before this method.
     pub(super) async fn register_memory_tools(
         &self,
         bridge: &xai_grok_tools::bridge::ToolBridge,
@@ -95,12 +89,10 @@ impl SessionActor {
         );
     }
 
-    /// Session-end memory save, empty-session-gated dream, and memory summary
-    /// telemetry. Shared by Shutdown and channel-closed so the dream gate cannot
-    /// drift between exit arms.
+    /// Session-end memory save, the dream (gated off for empty sessions), and memory summary telemetry.
+    /// Shared by Shutdown and channel-closed so the dream gate cannot drift between exit arms.
     ///
-    /// `log_suffix` is appended to the `MEMORY_SESSION_END:` log line so each
-    /// arm keeps a distinct reason string in logs.
+    /// `log_suffix` is appended to the `MEMORY_SESSION_END:` log line so each arm keeps a distinct reason string in logs.
     pub(super) async fn run_session_end_memory_pipeline(
         &self,
         log_suffix: &str,
@@ -116,9 +108,9 @@ impl SessionActor {
         }
         let mut session_end_result = "disabled";
         let mut total_chunks_at_end = 0usize;
-        // Dream consolidates *prior* logs. Run after Written/Failed, or when
-        // save was Skipped for config (`save_on_end=false`) but the session
-        // still meets the size threshold. Empty/brief sessions stay off.
+        // Dream consolidates *prior* logs
+        // Run after Written/Failed, or when save was Skipped for config (`save_on_end=false`) but the session still meets the size threshold
+        // Empty or brief sessions stay off
         let mut run_exit_dream = false;
         if let Some(storage) = self.memory.storage() {
             let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
@@ -142,8 +134,7 @@ impl SessionActor {
                 }
                 crate::session::memory::hooks::SessionEndResult::Skipped => {
                     session_end_result = "skipped";
-                    // `Skipped` also means save_on_end=false — still dream
-                    // when the conversation is substantial.
+                    // `Skipped` also means save_on_end=false; still dream when the conversation is substantial
                     run_exit_dream =
                         crate::session::memory::hooks::queries_meeting_session_end_threshold(
                             &conversation,
@@ -177,9 +168,7 @@ impl SessionActor {
     }
 
     /// Reindex a single file and embed any new chunks.
-    ///
-    /// Used after flush writes and session-end writes to keep the index
-    /// and embeddings up to date immediately.
+    /// Used after flush and session-end writes to keep the index and embeddings current immediately.
     pub(super) async fn reindex_and_embed(&self, path: &std::path::Path, source: &str) {
         self.memory.reindex_and_embed(path, source).await;
     }
@@ -205,8 +194,8 @@ impl SessionActor {
     /// Run dream consolidation if gates pass.
     ///
     /// Called at session end after the session summary is written.
-    /// Uses the same sampling client infrastructure as flush but sends
-    /// the dream prompt instead. The model call has a 60s timeout.
+    /// Uses the same sampling client infrastructure as flush but sends the dream prompt instead.
+    /// The model call has a 60s timeout.
     pub(super) async fn maybe_run_dream(&self) {
         if self.startup_hints.is_subagent {
             tracing::debug!(
@@ -245,7 +234,7 @@ impl SessionActor {
             .await;
     }
 
-    /// Run dream from `/dream` slash command, bypassing time/session gates.
+    /// Run dream from the `/dream` slash command, bypassing the time and session gates.
     pub(super) async fn run_dream_slash_command(&self) {
         use crate::session::memory::dream_lock::sessions_since;
 
@@ -363,9 +352,8 @@ impl SessionActor {
             let path = storage.workspace_memory_file();
             self.memory.reindex_and_embed(&path, "dream").await;
 
-            // Remove stale index chunks only for session files that
-            // were actually deleted — stems skipped by the recency guard
-            // are still on disk and must remain searchable.
+            // Remove stale index chunks only for session files that were actually deleted
+            // Stems skipped by the recency guard are still on disk and must remain searchable
             if !result.cleaned_stems.is_empty() {
                 let deleted_paths: Vec<std::path::PathBuf> = result
                     .cleaned_stems
@@ -432,13 +420,12 @@ impl SessionActor {
         Ok(response.assistant_text())
     }
 
-    /// Run a memory flush turn that summarizes recent conversation into a
-    /// session log. Sets `is_flushing` to suppress auto-compact during the call.
+    /// Run a memory flush turn that summarizes recent conversation into a session log.
+    /// Sets `is_flushing` to suppress auto-compact during the call.
     ///
     /// Flush failure is non-fatal; compaction proceeds regardless.
     ///
-    /// Returns `true` if a flush was executed, `false` if skipped because
-    /// another flush is already in progress.
+    /// Returns `true` if a flush was executed, `false` if skipped because another flush is already in progress.
     pub(super) async fn run_memory_flush(
         &self,
         trigger: &str,
@@ -446,8 +433,7 @@ impl SessionActor {
     ) -> bool {
         use xai_grok_memory::flush::*;
 
-        // Atomically acquire the flushing lock. If another flush is already
-        // running (idle timer, pre-compaction, or user-requested), skip.
+        // Atomically acquire the flushing lock. If another flush is already running (idle timer, pre-compaction, or user-requested), skip.
         if !self.memory.try_acquire_flush_lock() {
             tracing::info!(
                 target: xai_grok_telemetry::memory_log::TARGET,
@@ -536,8 +522,7 @@ impl SessionActor {
                 ..Default::default()
             };
 
-            // Run on the multi-threaded runtime so it doesn't block the
-            // session's LocalSet.
+            // Run on the multi-threaded runtime so it doesn't block the session's LocalSet
             let handle = tokio::spawn(async move {
                 let response = sampling_client
                     .conversation_collect(request)
@@ -545,8 +530,7 @@ impl SessionActor {
                     .map_err(|e| format!("flush model call failed: {e}"))?;
                 Ok::<_, String>(response.assistant_text())
             });
-            // Abort the spawned task if this future is dropped (session
-            // cancellation), preventing orphan HTTP streams.
+            // Abort the spawned task if this future is dropped (session cancellation), preventing orphan HTTP streams
             struct AbortOnDrop(tokio::task::AbortHandle);
             impl Drop for AbortOnDrop {
                 fn drop(&mut self) {
@@ -577,8 +561,7 @@ impl SessionActor {
                         let acc_len = content.len();
                         let truncated = acc_len < resp_len;
 
-                        // Semantic dedup: check if this content overlaps with
-                        // existing memory chunks before writing.
+                        // Semantic dedup: check if this content overlaps with existing memory chunks before writing
                         let is_sem_dup = if let Some(storage) = self.memory.storage() {
                             if let Some(index) = self.memory.open_index(&storage) {
                                 let provider = if let Some(ref params) = self.memory.backend_params
@@ -736,19 +719,16 @@ impl SessionActor {
         }
     }
 
-    /// Rewrite a raw memory note into well-structured markdown via a one-shot
-    /// LLM call using the `grok-4.6` model.
+    /// Rewrite a raw memory note into well-structured markdown via a one-shot LLM call to `grok-4.6`.
     ///
-    /// Follows the same pattern as [`handle_ai_suggest`]: prepares a
-    /// sampling client, builds a system+user prompt, collects the response
-    /// with a short idle timeout, and returns the text.
+    /// Same pattern as [`handle_ai_suggest`]: prepare a sampling client, build a system and user prompt, collect with a short idle timeout.
     pub(super) async fn handle_rewrite_memory_note(
         &self,
         raw_text: &str,
         context_summary: &str,
     ) -> Result<String, String> {
         // Upper-bound check to prevent unbounded LLM input.
-        const MAX_INPUT_BYTES: usize = 32 * 1024; // 32 KB
+        const MAX_INPUT_BYTES: usize = 32 * 1024;
         let combined_len = raw_text.len() + context_summary.len();
         if combined_len > MAX_INPUT_BYTES {
             return Err(format!(
@@ -790,8 +770,7 @@ impl SessionActor {
             ..Default::default()
         };
 
-        // Collect via the client so the LengthPolicy gate applies: a note
-        // truncated at the 1024-token cap must not persist to MEMORY.md.
+        // Collect via the client so the LengthPolicy gate applies: a note truncated at the 1024-token cap must not persist to MEMORY.md
         match sampling_client
             .conversation_collect_with_idle_timeout(request, std::time::Duration::from_secs(15))
             .await

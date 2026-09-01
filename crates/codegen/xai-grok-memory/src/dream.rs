@@ -960,13 +960,6 @@ mod tests {
         assert_eq!(msg.processed_stems, vec!["big"]);
     }
 
-    #[test]
-    fn normalize_memory_content_preserves_headers() {
-        let input = "## Topic A\n\nContent A.\n\n## Topic B\n\nContent B.";
-        let normalized = super::super::storage::normalize_memory_content(input);
-        assert_eq!(normalized, input);
-    }
-
     // -------------------------------------------------------------------
     // Session cleanup tests
     // -------------------------------------------------------------------

@@ -664,6 +664,15 @@ pub struct SubagentOutstandingRequest {
     pub respond_to: oneshot::Sender<SubagentOutstandingReply>,
 }
 
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct SubagentWaitPromptDrainedRequest {
+    pub parent_session_id: String,
+    pub prompt_id: String,
+    #[educe(Debug(ignore))]
+    pub respond_to: oneshot::Sender<SubagentOutstandingReply>,
+}
+
 /// Clear sticky incomplete after freeze/cancel has snapshotted the bill.
 #[derive(Debug)]
 pub struct SubagentClearUsageNotAppliedRequest {
@@ -779,8 +788,13 @@ pub enum SubagentValidateTypeOutcome {
     NotAllowed {
         allowed: Vec<String>,
     },
-    /// Coordinator unreachable; distinct from `Unknown` (the type may be valid).
+    /// Coordinator produced no verdict (busy past the timeout, dropped the
+    /// responder, or an internal resolution fault); distinct from `Unknown`
+    /// (the type may be valid) — a retry can succeed.
     ValidationUnavailable,
+    /// The coordinator channel is closed — it has shut down, so retries fail
+    /// instantly.
+    CoordinatorGone,
 }
 
 #[derive(Educe)]
@@ -888,6 +902,7 @@ pub enum SubagentEvent {
         parent_session_id: String,
     },
     Outstanding(SubagentOutstandingRequest),
+    WaitPromptDrained(SubagentWaitPromptDrainedRequest),
     ClearUsageNotApplied(SubagentClearUsageNotAppliedRequest),
     MarkUsageNotApplied(SubagentMarkUsageNotAppliedRequest),
     RegistryCounts(SubagentRegistryCountsRequest),

@@ -1,17 +1,11 @@
-//! Reconciles delivered key events with physical input state for
-//! terminal/OS pairs that drop modifier bits the application needs.
-//! [`KeyboardNormalizer`] pairs an OS-level [`ModifierProbe`] with a
-//! [`ModifierDelivery`] classification and rewrites incoming
-//! `KeyEvent`s in place so every downstream surface sees the canonical
-//! form.
+//! Reconciles delivered key events with physical input state for terminal/OS pairs that drop modifier bits the application needs.
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
 use crate::terminal::ModifierDelivery;
 
 /// Snapshot of physically-held modifier keys at a single point in time.
-/// Future probes can populate more bits; consumers should only read what
-/// they need.
+/// Future probes can populate more bits; consumers should only read what they need.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub struct ModifierState {
     pub command: bool,
@@ -41,12 +35,9 @@ impl ModifierProbe for OsModifierProbe {
     }
 }
 
-/// Reusable normalizer that upgrades incoming key events with modifiers
-/// the terminal failed to encode.
-///
-/// One instance lives on the pager's `AppView` and is invoked at the
-/// top of `handle_input`, so every downstream surface sees the rescued
-/// event. Construct with [`KeyboardNormalizer::from_terminal_context`].
+/// Reusable normalizer that upgrades incoming key events with modifiers the terminal failed to encode.
+/// One instance lives on the pager's `AppView` and is invoked at the top of `handle_input`, so every downstream surface sees the rescued event.
+/// Construct with [`KeyboardNormalizer::from_terminal_context`].
 #[derive(Debug, Clone, Copy)]
 pub struct KeyboardNormalizer<P: ModifierProbe = OsModifierProbe> {
     probe: P,
@@ -59,8 +50,8 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
         Self { probe, delivery }
     }
 
-    /// Upgrade a [`KeyEvent`] when a modifier is held but absent from the
-    /// event. Returns `Some` only if the delivered event changed.
+    /// Upgrade a [`KeyEvent`] when a modifier is held but absent from the event.
+    /// Returns `Some` only if the delivered event changed.
     pub fn rescue_key(&self, key: KeyEvent) -> Option<KeyEvent> {
         if key.code == KeyCode::Char('\u{0002}') && key.modifiers.is_empty() {
             let mut out = key;
@@ -78,8 +69,7 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
             return None;
         }
         let state = self.probe.snapshot();
-        // Cmd wins per macOS convention: Cmd+Backspace (line-kill) is the
-        // stronger action; almost no one holds Cmd+Opt simultaneously.
+        // Cmd wins per macOS convention: Cmd+Backspace (line-kill) is the stronger action; almost no one holds Cmd+Opt simultaneously
         let added = match (
             state.command && self.delivery.cmd.benefits_from_rescue(),
             state.option && self.delivery.opt.benefits_from_rescue(),
@@ -98,8 +88,7 @@ impl<P: ModifierProbe> KeyboardNormalizer<P> {
         Some(out)
     }
 
-    /// Upgrade an [`Event`] in place, owning a fresh `Event::Key` only
-    /// when a rescue actually fires.
+    /// Upgrade an [`Event`] in place, owning a fresh `Event::Key` only when a rescue actually fires.
     pub fn rescue<'a>(&self, ev: &'a Event) -> std::borrow::Cow<'a, Event> {
         if let Event::Key(k) = ev
             && let Some(upgraded) = self.rescue_key(*k)
@@ -260,9 +249,8 @@ mod tests {
 
     #[test]
     fn rescue_only_adds_modifier_for_dropped_axis() {
-        // Cmd is Native, only Opt is Dropped → bare Backspace + Cmd held
-        // must NOT be rescued (we'd be claiming a modifier the terminal
-        // would have delivered).
+        // Cmd is Native and only Opt is Dropped, so a bare Backspace with Cmd held must NOT be rescued
+        // Rescuing it would claim a modifier the terminal would have delivered
         let opt_only = ModifierDelivery::new_for_test(ModifierFate::Native, ModifierFate::Dropped);
         let n = make(
             ModifierState {

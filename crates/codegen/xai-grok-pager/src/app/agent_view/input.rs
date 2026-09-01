@@ -1078,6 +1078,7 @@ impl AgentView {
                 AgentPane::Queue => self.handle_queue_key(key, registry),
                 AgentPane::Tasks => self.handle_bg_tasks_key(key, registry),
                 AgentPane::Catalog => self.handle_catalog_key(key, registry),
+                AgentPane::Dock => self.handle_dock_key(key),
             },
             Event::Paste(text) => {
                 if self.active_pane == AgentPane::Scrollback
@@ -1107,7 +1108,7 @@ impl AgentView {
                         AgentPane::Tasks => self.tasks.handle_paste(text),
                         AgentPane::Catalog => self.catalog.handle_paste(text),
                         AgentPane::Queue => self.queue.handle_paste(text),
-                        AgentPane::Prompt | AgentPane::Scrollback => false,
+                        AgentPane::Prompt | AgentPane::Scrollback | AgentPane::Dock => false,
                     };
                     if consumed {
                         InputOutcome::Changed
@@ -1139,6 +1140,14 @@ impl AgentView {
             && key.kind != KeyEventKind::Release
             && registry.matches_id(ActionId::ToggleTasks, key)
         {
+            if self.active_pane == AgentPane::Dock {
+                self.set_active_pane(AgentPane::Scrollback, false);
+                return InputOutcome::Changed;
+            }
+            if self.dock_shown {
+                self.set_active_pane(AgentPane::Dock, false);
+                return InputOutcome::Changed;
+            }
             self.tasks.overlay.toggle();
             self.tasks.on_state_change();
             if self.tasks.overlay.focused {
@@ -1175,7 +1184,11 @@ impl AgentView {
             && registry.matches_id(ActionId::ToggleQueue, key)
             && (self.queue.is_visible() || !self.visible_queue_is_empty())
         {
-            self.toggle_queue_pane();
+            if self.dock_shown {
+                self.dock_queued_expanded = !self.dock_queued_expanded;
+            } else {
+                self.toggle_queue_pane();
+            }
             return InputOutcome::Changed;
         }
         if let Event::Key(key) = ev

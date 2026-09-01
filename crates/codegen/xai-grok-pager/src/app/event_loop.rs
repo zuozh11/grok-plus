@@ -540,6 +540,10 @@ impl Presenter {
             |force| {
                 if force {
                     let _ = terminal.clear();
+                    // terminal.clear() rewrote every cell, erasing iTerm2
+                    // inline pixels; drop overlay ownership so the next
+                    // preview frame re-emits instead of taking the keep path.
+                    crate::terminal::overlay::reset_owner();
                 }
                 app.draw(terminal);
             },
@@ -1107,6 +1111,7 @@ pub(crate) async fn run(
         ("--tools", args.cli_tools.is_some()),
         ("--disallowed-tools", args.cli_disallowed_tools.is_some()),
         ("--max-turns", args.max_turns.is_some()),
+        ("--memory-flush", args.memory_flush),
     ];
     for &(flag, set) in headless_only {
         if set {
@@ -2612,6 +2617,17 @@ pub(crate) async fn run(
                         // Debounce: schedule a single draw after the size stabilizes.
                         // Each new resize resets the timer, so layout is rebuilt only once
                         resize_debounce_at = Some(Instant::now() + RESIZE_DEBOUNCE);
+                        // One immediate draw repaints the (now hidden) preview
+                        // cells — the erase on iTerm2, which smears committed
+                        // pixels during a drag (see resize_hides_prompt_preview).
+                        // Ownership then clears, so later drag events fall back
+                        // to pure debounce.
+                        if crate::terminal::overlay::has_committed_owner()
+                            && crate::terminal::image::prompt_preview_graphics_protocol()
+                                == crate::terminal::image::GraphicsProtocol::ITerm2
+                        {
+                            presenter.request(false);
+                        }
                     } else {
                         // Non-resize change (or a shown tip): draw immediately (picks up any pending resize too)
                         resize_debounce_at = None;

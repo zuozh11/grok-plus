@@ -494,30 +494,9 @@ fn print_leader_disabled_by_sandbox(profile: &str, w: &mut impl Write) {
          managed requirement) to use the leader."
     );
 }
-/// Join early prefetch to get remote settings (with timeout).
-///
-/// Remote settings come from the product settings API and contain `leader_mode`, announcements, etc.
-/// Waits up to 2 s for the background thread.
-pub fn join_early_prefetch(
-    handle: Option<xai_grok_shell::agent::models::EarlyPrefetchHandle>,
-) -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    let handle = handle?;
-    if handle.is_finished() {
-        return match handle.join() {
-            Ok(r) => r.settings,
-            Err(_) => None,
-        };
-    }
-    let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(handle.join());
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-        Ok(Ok(r)) => r.settings,
-        _ => None,
-    }
-}
+/// Startup proceeds without remote settings (`leader_mode`, announcements)
+/// after this; the fetch keeps running and the agent boot consumes it.
+pub const EARLY_PREFETCH_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// First non-blank value of CLI, then env, then config.
 /// `None` means nothing was set; `acp::initialize` canonicalizes and applies the default.
 fn resolve_hunk_tracker_mode(
@@ -642,9 +621,11 @@ pub async fn run(
     )
     .await
     .unwrap_or(None);
-    let early_prefetch = match refreshed_auth {
-        Some(auth) => xai_grok_shell::agent::models::start_early_prefetch_with_auth(Some(auth)),
-        None => xai_grok_shell::agent::models::start_early_prefetch(Some(grok_com_config.clone())),
+    let had_prefetch = match refreshed_auth {
+        Some(auth) => xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
+        None => {
+            xai_grok_shell::agent::models::startup_prefetch::begin(Some(grok_com_config.clone()))
+        }
     };
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
     tokio::task::spawn_blocking(|| {});
@@ -652,13 +633,22 @@ pub async fn run(
         crate::git_info::populate_from_cwd_async(cwd);
     }
     let prefetch_wait_started = std::time::Instant::now();
-    let had_prefetch = early_prefetch.is_some();
-    let remote_settings = join_early_prefetch(early_prefetch);
-    if had_prefetch {
+    let remote_settings = if had_prefetch {
+        let _wait_span = region!("startup.prefetch_join_wait", Parent::Inherit);
+        let settings =
+            xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT);
         xai_grok_telemetry::startup::record_prefetch_wait(prefetch_wait_started.elapsed());
-    }
+        settings
+    } else {
+        None
+    };
     xai_grok_shell::util::config::cache_remote_auto_mode(
         remote_settings.as_ref().and_then(|s| s.auto_mode.clone()),
+    );
+    xai_grok_shell::util::config::cache_remote_prompt_suggestions(
+        remote_settings
+            .as_ref()
+            .and_then(|s| s.prompt_suggestions.clone()),
     );
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
@@ -1975,6 +1965,12 @@ mod tests {
     #[test]
     fn cli_hidden_memory_compat_flags_conflict() {
         assert!(try_parse_pager(&["grok-pager", "--experimental-memory", "--no-memory"]).is_err());
+    }
+    #[test]
+    fn cli_memory_flush_flag_parses() {
+        let args = try_parse_pager(&["grok-pager", "--memory-flush"]).unwrap();
+        assert!(args.memory_flush);
+        assert!(!try_parse_pager(&["grok-pager"]).unwrap().memory_flush);
     }
     #[test]
     fn cli_neither_leader_flag_defaults_false() {

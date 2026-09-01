@@ -1,18 +1,14 @@
 //! OS-level rescue for the modified-Enter chord.
 //!
-//! Apple Terminal can't deliver Shift/Opt/Cmd + Enter modifier flags via
-//! crossterm. We side-channel through the same OS probe used by
-//! [`super::keyboard_normalizer`] and gate on
-//! [`crate::terminal::KeyboardCapabilities::enter_needs_rescue`] so the
-//! per-brand truth lives in one place.
+//! Apple Terminal can't deliver Shift/Opt/Cmd + Enter modifier flags via crossterm.
+//! We read modifier state through the same OS probe as [`super::keyboard_normalizer`].
+//! [`crate::terminal::KeyboardCapabilities::enter_needs_rescue`] gates the rescue so which terminal brands need it is decided in one place.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::terminal::terminal_context;
 
-/// Returns `true` when the user is holding a modifier that should turn a
-/// bare `Enter` into a newline, and the active terminal is classified as
-/// dropping that information.
+/// Returns `true` when the user holds a modifier that should turn bare `Enter` into a newline and the terminal is classified as dropping those flags.
 pub fn is_apple_terminal_newline_modifier_held() -> bool {
     let ctx = terminal_context();
     if !ctx.keyboard_capabilities().enter_needs_rescue() {
@@ -21,13 +17,10 @@ pub fn is_apple_terminal_newline_modifier_held() -> bool {
     os_any_newline_modifier_held()
 }
 
-/// Shift/Alt+Enter, or bare Enter while a newline modifier is held and the
-/// terminal drops those flags ([`is_apple_terminal_newline_modifier_held`]).
+/// Shift/Alt+Enter, or bare Enter while a newline modifier is held and the terminal drops those flags ([`is_apple_terminal_newline_modifier_held`]).
 /// Always requires `KeyCode::Enter` so Shift+Tab / Shift+letters never match.
-///
-/// SUPER/Cmd is not included: on most terminals Cmd+Enter is fullscreen or
-/// split. Apple Terminal Cmd+Enter is rescued via CoreGraphics on bare Enter
-/// ([`is_apple_terminal_newline_modifier_held`]), not the SUPER flag.
+/// SUPER/Cmd is not included: on most terminals Cmd+Enter is fullscreen or split.
+/// Apple Terminal Cmd+Enter is rescued via CoreGraphics on bare Enter ([`is_apple_terminal_newline_modifier_held`]), not the SUPER flag.
 pub fn is_mod_enter(key: &KeyEvent) -> bool {
     key.code == KeyCode::Enter
         && (key
@@ -62,9 +55,8 @@ mod tests {
             KeyCode::Enter,
             KeyModifiers::ALT
         )));
-        // SUPER/Cmd is not a product-wide newline chord (fullscreen/split on
-        // many terminals). Apple Terminal Cmd+Enter is rescued via CoreGraphics
-        // on bare Enter, not via the SUPER flag here.
+        // SUPER/Cmd is not a product-wide newline chord (fullscreen/split on many terminals)
+        // Apple Terminal Cmd+Enter is rescued via CoreGraphics on bare Enter, not via the SUPER flag here
         assert!(!is_mod_enter(&KeyEvent::new(
             KeyCode::Enter,
             KeyModifiers::SUPER
