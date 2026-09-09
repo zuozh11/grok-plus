@@ -277,16 +277,8 @@ pub struct HitArea {
     pub rect: Option<Rect>,
     pub hovered: bool,
 }
-
-#[derive(Debug)]
-pub(crate) struct PendingResponseAnnotation {
-    pub(crate) selected_text: String,
-    pub(crate) stashed_prompt: crate::views::prompt_widget::StashedPrompt,
-}
-/// Privacy upsell banner state on the agent view: whether the banner owns
-/// the banner slot this frame (`active`, set at draw start like
-/// `session_banner_active`; persists until acted on, so it is a tip
-/// occluder AND a tip-tick freezer) plus the four click targets.
+/// Privacy upsell banner state on the agent view: whether the banner owns the banner slot this frame (`active`, set at draw start like
+/// `session_banner_active`; persists until acted on, so it is a tip occluder AND a tip-tick freezer) plus the four click targets.
 #[derive(Debug, Default)]
 pub struct PrivacyBannerState {
     pub(crate) active: bool,
@@ -1000,11 +992,6 @@ pub struct AgentView {
     /// completion, double-click, or triple-click. Cleared on next click
     /// elsewhere, Escape, or navigation.
     pub persistent_text_selection: Option<PersistentTextSelection>,
-    /// Copy text paired with the persistent selection above. Used by the
-    /// selection's "引用" affordance without reading back from the clipboard.
-    pub(crate) persistent_text_selection_text: Option<(PersistentTextSelection, String)>,
-    /// Dedicated Codex-like comment editor state for the current selected excerpt.
-    pub(crate) pending_response_annotation: Option<PendingResponseAnnotation>,
     /// Table geometry for the held highlight. Not shared with an in-progress drag.
     pub table_selection_geometry: Option<TableSelectionGeometry>,
     /// Table geometry for the active drag. A `/btw` drag must not steal the held slot.
@@ -1259,9 +1246,8 @@ pub struct AgentView {
     pub(crate) hit_sb_copy: HitArea,
     /// Hit area for scrollback selection box view button.
     pub(crate) hit_sb_view: HitArea,
-    /// Hit area for the "引用" button shown beside a persistent text selection.
-    pub(crate) hit_text_selection_quote: HitArea,
     /// Active question view (from `AskUserQuestion` tool). When `Some`, the prompt area shows a structured question UI and input is modal.
+    /// prompt area shows a structured question UI and input is modal.
     pub(crate) question_view: Option<QuestionViewState>,
     pub(crate) elicitation_view: Option<ElicitationViewState>,
     pub(crate) pending_elicitation: Option<(

@@ -838,7 +838,6 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
             self.bq_depth += 1;
         }
 
-        let is_link = matches!(&tag, Tag::Link { .. });
         let mut more = Vec::new();
         let style = match &tag {
             Tag::Paragraph => None,
@@ -1116,16 +1115,8 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                         force: false,
                     });
                     self.buffers.transforms.push(Transform {
-                        range: if is_link {
-                            bracket_abs..range.end
-                        } else {
-                            bracket_abs..bracket_abs + 2
-                        },
-                        to: if is_link {
-                            "".to_string()
-                        } else {
-                            " (".to_string()
-                        },
+                        range: bracket_abs..bracket_abs + 2,
+                        to: " (".to_string(),
                         force: false,
                     });
                     if text_end > text_start {

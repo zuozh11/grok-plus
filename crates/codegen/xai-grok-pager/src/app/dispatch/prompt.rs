@@ -535,9 +535,6 @@ pub(super) fn dispatch_send_prompt_submission(
         agent.deferred_send = Some(crate::app::agent_view::AgentDeferredSend::SendPrompt);
         return prelude;
     }
-    let annotation_wire_text = consume_input
-        .then(|| agent.prompt.response_annotations_wire_text(&text))
-        .flatten();
 
     // Submitting the prompt retires any edit-contextual ephemeral tip (ambient tips live out their TTL across the submit)
     agent.ephemeral_tip.clear_on_submit();
@@ -985,28 +982,12 @@ pub(super) fn dispatch_send_prompt_submission(
             {
                 maybe_show_send_now_tip(app);
             }
-
-            effects.push(if let Some(wire_text) = annotation_wire_text {
-                let mut tb = acp::TextContent::new(wire_text);
-                let map = tb.meta.get_or_insert_with(acp::Meta::new);
-                map.insert(
-                    crate::acp::meta::user_prompt_meta::DISPLAY_TEXT.into(),
-                    serde_json::Value::String(text),
-                );
-                Effect::SendPromptBlocks {
-                    agent_id,
-                    session_id,
-                    blocks: vec![acp::ContentBlock::Text(tb)],
-                    prompt_id,
-                }
-            } else {
-                Effect::SendPrompt {
-                    agent_id,
-                    session_id,
-                    text,
-                    prompt_id,
-                    skill_token_ranges,
-                }
+            effects.push(Effect::SendPrompt {
+                agent_id,
+                session_id,
+                text,
+                prompt_id,
+                skill_token_ranges,
             });
             return effects;
         }

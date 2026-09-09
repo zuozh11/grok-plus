@@ -134,30 +134,21 @@ fn build_style() -> MarkdownStyle {
     MarkdownStyle {
         heading_inner: heading_inner_styles(heading_colors, heading_mods),
         heading_outer: heading_outer_styles(heading_colors),
-        strong_inner: if is_grok_plus {
-            fg(strong)
-        } else {
-            fg(strong).bold()
-        },
+        strong_inner: fg(strong).bold(),
         strong_outer: Style::new().dimmed().hidden(),
         emphasis_inner: fg(emphasis).italic(),
         emphasis_outer: Style::new().dimmed().hidden(),
         strikethrough_inner: fg(theme.md_text).strikethrough(),
         strikethrough_outer: Style::new().dimmed().hidden(),
-        inline_code_inner: if is_grok_plus {
-            fg(theme.md_code)
-        } else {
-            fg(theme.md_code).bold()
-        },
+        inline_code_inner: fg(theme.md_code).bold(),
         inline_code_outer: fg(theme.md_code).dimmed().hidden(),
         blockquote_inner: if is_grok_plus {
             fg(quote_text)
         } else {
             fg(theme.md_text)
         },
-        // Selection-side bar detection (xai-grok-pager scrollback/blocks/
-        // quote_bar.rs quote_bar_style) mirrors this exact style; its
-        // end-to-end tests fail if this line changes.
+        // The selection-side bar detection in xai-grok-pager (scrollback/blocks/quote_bar.rs, `quote_bar_style`) mirrors this exact style
+        // Its end-to-end tests fail if this line changes
         blockquote_outer: if is_grok_plus {
             fg(quote_bar)
         } else {
