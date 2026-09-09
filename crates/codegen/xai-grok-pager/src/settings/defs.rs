@@ -41,7 +41,7 @@ const THEME_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "grok-plus",
         display: "Grok Plus",
-        description: "Codex Plus Markdown colors on Grok Night.",
+        description: "Codex Plus Markdown colors on the terminal-native chrome.",
     },
     EnumChoice {
         canonical: "grokday",
@@ -434,7 +434,7 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "grok-plus",
         display: "Grok Plus",
-        description: "Codex Plus Markdown colors on Grok Night.",
+        description: "Codex Plus Markdown colors on the terminal-native chrome.",
     },
     EnumChoice {
         canonical: "grokday",

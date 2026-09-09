@@ -1002,6 +1002,8 @@ mod tests {
                 // Reset plus named ANSI entries: the scrollbar rides the
                 // terminal's own fg/bg contrast, so there is no RGB delta.
                 ThemeKind::Terminal => continue,
+                // Same bandless palette as `terminal`: Reset track, ANSI thumb.
+                ThemeKind::GrokPlus => continue,
                 ThemeKind::Auto => unreachable!("ALL excludes Auto"),
             };
             let track = lum(theme.scrollbar_bg, "scrollbar_bg", kind);

@@ -232,10 +232,10 @@ impl UserPromptBlock {
         let theme = Theme::current();
         // Minimal mode engages this lock; read it here instead of app state.
         let terminal_native = crate::theme::cache::terminal_native_locked();
-        // The terminal theme (fullscreen) renders prompts bandless: bold
-        // primary text instead of a bright-black band, which can sit too
-        // close to the default fg on some profiles. Minimal keeps its band.
-        let attribute_emphasis = !terminal_native && crate::theme::cache::terminal_native_active();
+        // Bandless prompts carry no fill, so bold the primary text to keep the
+        // turn distinguishable; RGB themes rely on their band instead.
+        let attribute_emphasis = !terminal_native
+            && (crate::theme::cache::terminal_native_active() || theme.is_bandless());
         let (mut prefix_style, mut text_style, mut skill_style) =
             Self::prompt_styles(&theme, terminal_native);
         if attribute_emphasis {

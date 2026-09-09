@@ -6485,6 +6485,8 @@ fn max_thoughts_width_preview_title_styling_distinguishes_from_content() {
         // assertion below does not apply — the preview reads via the
         // underline cue instead.
         crate::theme::ThemeKind::Terminal => return,
+        // Bandless like `terminal`: the two-tone bg assertion does not apply.
+        crate::theme::ThemeKind::GrokPlus => return,
         crate::theme::ThemeKind::Auto => crate::theme::Theme::groknight(),
     };
     assert_ne!(
