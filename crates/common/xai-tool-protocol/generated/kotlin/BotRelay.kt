@@ -388,6 +388,8 @@ const val COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE: String = "attachment_wrong_s
 const val COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: String = "attachment_too_large"
 /** `reason` on `command_rejected` when the BotChat upload is not PostProcessDone. */
 const val COMMAND_REJECTED_ATTACHMENT_NOT_READY: String = "attachment_not_ready"
+/** `reason` on `command_rejected` when the live box gateway refused a well-formed command with its own sentence. */
+const val COMMAND_REJECTED_BOX_REFUSED: String = "box_refused"
 /** `reason` on `command_rejected` when the box refused a well-formed */
 const val COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: String = "gateway/unknown-method"
 

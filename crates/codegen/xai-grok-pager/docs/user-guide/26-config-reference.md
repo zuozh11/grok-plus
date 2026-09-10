@@ -348,6 +348,7 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `memory.enabled` | `boolean` | `pin` | `user` | Cross-session memory master switch. Also GROK_MEMORY. |
+| `memory.mode` | `"legacy"`, `"v2"` | — | `user` | Selects the persistent-memory implementation for new sessions. Default: `"legacy"`. `"v2"` is experimental; its legacy search, flush, and Dream paths are disabled. |
 
 ### `model`
 

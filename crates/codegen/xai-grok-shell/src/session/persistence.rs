@@ -259,12 +259,7 @@ pub enum PersistenceMsg {
         request_id: Option<String>,
     },
     WakeStart {
-        prior: WakeSummaryState,
-        attempt_id: String,
-        next_trace_turn: u64,
-        model_id: acp::ModelId,
-        agent_name: Option<String>,
-        reasoning_effort: Option<Option<ReasoningEffort>>,
+        start: WakeStart,
         abort: tokio_util::sync::CancellationToken,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
@@ -655,6 +650,16 @@ fn read_summary_from_dir(session_dir: &Path) -> RelocationResult<Summary> {
         source: error,
     })?;
     serde_json::from_slice(&bytes).map_err(|source| RelocationError::Json { path, source })
+}
+
+#[derive(Clone, Debug)]
+pub struct WakeStart {
+    pub prior: WakeSummaryState,
+    pub attempt_id: String,
+    pub next_trace_turn: u64,
+    pub model_id: acp::ModelId,
+    pub agent_name: Option<String>,
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1239,14 +1244,16 @@ impl Summary {
         )
     }
 
-    /// Unused TUI-open husk: no title, no turns, not an explicit worktree/fork.
-    /// Hidden from `grok -c` / `--resume` as well as `grok sessions list`.
+    /// Unused TUI-open husk: untitled, 0 messages, and no fork provenance.
+    /// Worktree stamps do not exempt. `session_kind == "fork"` or
+    /// `parent_session_id` / `forked_at` do (worktree forks keep kind `worktree`).
     pub fn is_unused_optimistic_husk(&self) -> bool {
-        if matches!(self.session_kind.as_deref(), Some("worktree" | "fork"))
+        if matches!(self.session_kind.as_deref(), Some("fork"))
             || self
-                .worktree_label
+                .parent_session_id
                 .as_deref()
-                .is_some_and(|label| !label.is_empty())
+                .is_some_and(|id| !id.is_empty())
+            || self.forked_at.is_some()
         {
             return false;
         }
@@ -2275,27 +2282,13 @@ impl SessionPersistence {
                     }
                 }
                 PersistenceMsg::WakeStart {
-                    prior,
-                    attempt_id,
-                    next_trace_turn,
-                    model_id,
-                    agent_name,
-                    reasoning_effort,
+                    start,
                     abort,
                     respond_to,
                 } => {
                     let result = self
                         .storage
-                        .update_wake_start(
-                            &self.info,
-                            prior,
-                            attempt_id,
-                            next_trace_turn,
-                            model_id,
-                            agent_name,
-                            reasoning_effort,
-                            abort,
-                        )
+                        .update_wake_start(&self.info, start, abort)
                         .await;
                     let result = if result.is_ok() {
                         self.flush_and_sync().await

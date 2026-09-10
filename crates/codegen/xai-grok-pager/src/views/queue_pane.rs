@@ -905,9 +905,8 @@ impl QueuePane {
             .style(self.list_style)
             .render(list_area, buf, &mut self.list_state);
 
-        // Hover affordance: paint a dim hover bg on the row under the mouse
-        // It matches the scrollback tool-call hover (`blend(bg_base, bg_dark, 0.5)`)
-        // Selection wins: skip when the hovered row is the focused selection, which already carries the (stronger) selection bg
+        // Hover affordance: paint the same dim row-hover bg the scrollback and dock use.
+        // Selection wins: skip when the hovered row is the focused selection, which already carries the (stronger) selection bg.
         let hovered_idx = self
             .hovered_row_id
             .and_then(|id| self.entries.iter().position(|e| e.id == id));
@@ -926,9 +925,7 @@ impl QueuePane {
                 && rel < inner.height as usize
             {
                 let screen_y = inner.y + rel as u16;
-                let theme = Theme::current();
-                let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
-                    .unwrap_or(theme.bg_dark);
+                let hover_bg = Theme::current().row_hover_bg();
                 let row = Rect::new(inner.x, screen_y, inner.width, 1);
                 buf.set_style(row, Style::default().bg(hover_bg));
             }
@@ -989,11 +986,9 @@ impl QueuePane {
                 let interject_w = interject_label.len() as u16;
                 let show_send_now = can_send_now && entry.capabilities.can_send_now();
 
-                // [edit] renders regardless of turn state; the keyboard `e` edit
-                // works either way. Flush against its neighbours: a gap would let
-                // the queued message behind the row leak through the seam.
-                // A row that fits [Send now] but not [Send now][edit] drops
-                // [edit] so the time-sensitive button keeps its slot.
+                // [edit] always paints; keyboard `e` works either way. Flush to
+                // neighbours so the queued message cannot leak through a gap.
+                // Drop [edit] if [Send now] fits alone but not with [edit].
                 let edit_label = "[edit]";
                 let edit_w = edit_label.len() as u16;
                 let send_now_fits_alone = show_send_now && fits(right, interject_w).is_some();
@@ -1863,9 +1858,7 @@ mod tests {
         assert!(pane.update_row_hover(inner.x, inner.y + 1));
         pane.render(area, &mut buf, false, &layout_cfg, None, true);
 
-        let theme = Theme::current();
-        let hover_bg = crate::render::color::blend_color(theme.bg_base, theme.bg_dark, 0.5)
-            .unwrap_or(theme.bg_dark);
+        let hover_bg = Theme::current().row_hover_bg();
 
         // Hovered (second) row carries the hover bg across its full width.
         assert_eq!(buf[(inner.x, inner.y + 1)].bg, hover_bg);

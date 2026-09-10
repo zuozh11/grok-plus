@@ -331,12 +331,10 @@ async fn create_test_actor_inner(
         auth_manager: None,
         is_chat_kind: false,
         state,
-        notifications: NotificationSender {
-            gateway: GatewaySender::new(gateway_tx),
-            gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        notifications: NotificationSender::for_tests(
+            GatewaySender::new(gateway_tx),
             persistence_tx,
-            disk_full: crate::session::notifications::idle_disk_full_rx(),
-        },
+        ),
         permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
         tool_context,
         deny_read_globs: Vec::new(),
@@ -378,6 +376,8 @@ async fn create_test_actor_inner(
             cancel: Default::default(),
         },
         memory: crate::session::memory_state::SessionMemory {
+            configured_mode: None,
+            configured_storage: None,
             flush_config: crate::config::MemoryFlushConfig::default(),
             is_flushing: std::sync::atomic::AtomicBool::new(false),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
@@ -426,6 +426,7 @@ async fn create_test_actor_inner(
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -478,12 +479,15 @@ async fn create_test_actor_inner(
         deferred_prefix: DeferredPrefix::new(),
         mcp_startup_waits: Default::default(),
         mcp_init_tasks: Default::default(),
+        weak_self: std::sync::Weak::new(),
+        startup_tasks: Default::default(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_disabled: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -1154,10 +1158,13 @@ pub(crate) async fn actor_with_mcp(
         st.cancel_any_init();
         if initialized || !initializing.is_empty() {
             std::mem::forget(st.try_start_init().expect("fixture claims init"));
-            let generation = st.generation();
-            st.mark_servers_initializing(generation, initializing);
+            let handshakes_pending = !initializing.is_empty();
+            st.mark_servers_initializing(initializing);
             if initialized {
-                st.finish_init(generation);
+                st.finish_init();
+                if !handshakes_pending {
+                    st.complete_init();
+                }
             }
         }
     }
@@ -1222,4 +1229,13 @@ impl xai_tool_runtime::Tool for StubMcpTool {
             ),
         ))
     }
+}
+/// The returned set plays the run loop: startup tasks live while it does.
+pub(crate) fn with_run_loop(mut actor: SessionActor) -> (Arc<SessionActor>, StartupTaskSet) {
+    let startup_tasks = StartupTaskSet::install(&actor);
+    let actor = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| {
+        actor.weak_self = weak.clone();
+        actor
+    });
+    (actor, startup_tasks)
 }

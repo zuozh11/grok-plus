@@ -1352,7 +1352,8 @@ pub struct Config {
     /// Original CLI `--subagents` tri-state, preserved for re-resolution when remote settings are refreshed on /new.
     #[serde(skip)]
     pub cli_subagents: Option<bool>,
-    /// Resolved memory configuration. `None` when memory is disabled.
+    /// Resolved memory configuration, including the disabled state so mode is
+    /// pinned when a session is spawned.
     /// Resolved by [`RuntimeResolutionContext`] in [`Config::resolve_runtime_fields`].
     #[serde(skip)]
     pub memory_config: Option<crate::config::MemoryConfig>,
@@ -1817,7 +1818,7 @@ impl Config {
             ("disabled_models", &self.models.disabled_models),
             ("hidden_models", &self.models.hidden_models),
         ] {
-            if let Err(bad) = crate::agent::models::ModelGlobSet::compile(list.as_deref()) {
+            if let Err(bad) = crate::agent::remote_config::ModelGlobSet::compile(list.as_deref()) {
                 return Err(format!(
                     "{field} has an invalid pattern: {}. Patterns use * and ? wildcards.",
                     bad.join(", ")
@@ -2221,7 +2222,7 @@ impl Config {
         self.prompt_suggest_model_pin = models.prompt_suggestion;
         self.memory_enabled_override = ctx.memory_enabled_override;
         let mem = self.resolve_memory(ctx.memory_enabled_override, ctx.remote_settings);
-        self.memory_config = if mem.enabled { Some(mem) } else { None };
+        self.memory_config = Some(mem);
         self.disable_web_search = self.disable_web_search || ctx.disable_web_search;
         self.todo_gate = ctx.todo_gate;
         self.laziness_debug_log = ctx.laziness_debug_log.map(std::path::Path::to_path_buf);

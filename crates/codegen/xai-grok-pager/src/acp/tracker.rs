@@ -61,7 +61,14 @@ pub enum WaitingReason {
     TasksComplete,
     /// Explicit sleep / await (`Await` / `Sleep …`).
     Sleep,
+    /// Blocked on an awaited hook batch; shown only once it outlives [`HOOK_REVEAL_DELAY`], so a fast hook never flashes.
+    Hooks { event_name: String, count: usize },
+    /// The sent prompt has not been acknowledged by the agent yet (past the soft notice, see `app::prompt_ack`).
+    /// View-only like `Model`; the tracker never stores it.
+    PromptAck,
 }
+/// Batches younger than this stay hidden: most hooks finish well under it.
+pub const HOOK_REVEAL_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 /// Max chars for wait/tool *description* subjects in status UI (matches tool-title truncation in `format_activity_label`).
 pub const MAX_ACTIVITY_SUBJECT_CHARS: usize = 40;
 /// First non-empty trimmed line, clamped to [`MAX_ACTIVITY_SUBJECT_CHARS`].
@@ -116,6 +123,11 @@ impl WaitingReason {
             Self::TaskOutput { .. } => "Waiting on task output…".to_string(),
             Self::TasksComplete => "Waiting on tasks…".to_string(),
             Self::Sleep => "Sleeping…".to_string(),
+            Self::Hooks { event_name, count } if *count > 1 => {
+                format!("Running {count} {event_name} hooks…")
+            }
+            Self::Hooks { event_name, .. } => format!("Running {event_name} hook…"),
+            Self::PromptAck => "Waiting for the agent to accept the prompt…".to_string(),
         }
     }
     /// Short, stable snake_case label for telemetry / phase-transition logs.
@@ -126,6 +138,8 @@ impl WaitingReason {
             Self::TaskOutput { .. } => "waiting_task_output",
             Self::TasksComplete => "waiting_tasks_complete",
             Self::Sleep => "waiting_sleep",
+            Self::Hooks { .. } => "waiting_hooks",
+            Self::PromptAck => "waiting_prompt_ack",
         }
     }
 }
@@ -306,6 +320,22 @@ pub struct PendingCompaction {
     pub elapsed_ms: Option<i64>,
     pub last_used: Option<u64>,
 }
+/// Names one batch on both `HookRunStarted` and `HookExecution`; an outcome ends the phase only for the batch that armed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookBatchId {
+    pub event_name: String,
+    pub tool_name: Option<String>,
+}
+#[derive(Debug)]
+struct HooksRunning {
+    batch: HookBatchId,
+    reason: WaitingReason,
+    /// Local arrival, for the reveal delay and the phase timer.
+    since: std::time::Instant,
+    /// The announcement's shell `agentTimestampMs`. Chunks ride the shell's debounced buffer while the announcement is
+    /// sent direct, so a chunk stamped at or before this predates the gate.
+    started_at_ms: Option<i64>,
+}
 /// Tracks in-flight streaming state for one agent's turn.
 /// Converts ACP `SessionUpdate` variants into scrollback entry mutations.
 /// Does nothing else: no UI, no networking, just data transformation.
@@ -365,6 +395,8 @@ pub struct AcpUpdateTracker {
     /// Set by `set_retry_activity()` from ExtNotification `RetryState::Retrying`.
     /// Auto-cleared when normal streaming data resumes (in `handle_update` and `note_tool_call_arguments_delta`) and on `finish_turn()`.
     retry_activity: Option<TurnActivity>,
+    /// The awaited hook batch the turn is blocked on; ended by its `HookExecution`, resumed model text, or turn end.
+    hooks_running: Option<HooksRunning>,
     /// Set per `ToolCallDeltaChunk` (streaming-only, never persisted, cannot replay).
     writing_tool_call: Option<(WritingToolCall, std::time::Instant)>,
     /// Per-`tool_index` names so interleaved deltas can restore a call's name when the stream switches back to it.
@@ -467,6 +499,9 @@ impl AcpUpdateTracker {
         if self.compaction_activity.is_some() {
             return self.compaction_activity.clone();
         }
+        if let Some(hooks) = self.revealed_hooks_running() {
+            return Some(hooks);
+        }
         if let Some(waiting) = self.activity_known_blocking_wait() {
             return Some(waiting);
         }
@@ -522,7 +557,7 @@ impl AcpUpdateTracker {
                 WaitingReason::TasksComplete => 1,
                 WaitingReason::Sleep => 2,
                 WaitingReason::Subagent { .. } => 3,
-                WaitingReason::Model => 4,
+                WaitingReason::Model | WaitingReason::PromptAck | WaitingReason::Hooks { .. } => 4,
             })
             .map(|w| w.reason.clone())
     }
@@ -584,6 +619,69 @@ impl AcpUpdateTracker {
     pub fn set_retry_activity(&mut self, activity: Option<TurnActivity>) {
         self.retry_activity = activity;
     }
+    /// Record the awaited batch from `HookRunStarted`; the spinner shows it after [`HOOK_REVEAL_DELAY`].
+    pub fn set_hooks_running(
+        &mut self,
+        batch: HookBatchId,
+        count: usize,
+        started_at_ms: Option<i64>,
+    ) {
+        self.set_hooks_running_since(batch, count, std::time::Instant::now(), started_at_ms);
+    }
+    /// [`Self::set_hooks_running`] with an explicit batch start, so the reveal delay can be tested without sleeping.
+    pub(crate) fn set_hooks_running_since(
+        &mut self,
+        batch: HookBatchId,
+        count: usize,
+        since: std::time::Instant,
+        started_at_ms: Option<i64>,
+    ) {
+        let reason = WaitingReason::Hooks {
+            event_name: batch.event_name.clone(),
+            count,
+        };
+        self.hooks_running = Some(HooksRunning {
+            batch,
+            reason,
+            since,
+            started_at_ms,
+        });
+    }
+    /// `batch`'s `HookExecution` arrived; ends the phase only for the batch that armed it. Returns whether a phase was showing.
+    pub fn clear_hooks_running(&mut self, batch: &HookBatchId) -> bool {
+        if self
+            .hooks_running
+            .as_ref()
+            .is_none_or(|hooks| hooks.batch != *batch)
+        {
+            return false;
+        }
+        self.hooks_running
+            .take()
+            .is_some_and(|hooks| hooks.since.elapsed() >= HOOK_REVEAL_DELAY)
+    }
+    /// The hook phase once its batch has outlived the reveal delay.
+    fn revealed_hooks_running(&self) -> Option<TurnActivity> {
+        let hooks = self.hooks_running.as_ref()?;
+        (hooks.since.elapsed() >= HOOK_REVEAL_DELAY)
+            .then(|| TurnActivity::Waiting(hooks.reason.clone()))
+    }
+    /// When the awaited hook batch started, so the phase timer counts the whole wait rather than from the reveal.
+    pub fn hooks_running_since(&self) -> Option<std::time::Instant> {
+        self.hooks_running.as_ref().map(|hooks| hooks.since)
+    }
+    /// Whether a model-text chunk was already queued in the shell's buffer when the awaited batch was announced.
+    fn chunk_predates_hook_batch(&self, meta: &NotificationMeta) -> bool {
+        match (
+            self.hooks_running
+                .as_ref()
+                .and_then(|hooks| hooks.started_at_ms),
+            meta.agent_timestamp_ms,
+        ) {
+            (Some(started), Some(stamped)) => stamped <= started,
+            _ => false,
+        }
+    }
     /// Record a `ToolCallDeltaChunk`; returns `true` only when the visible label changed (continuation deltas need no redraw).
     pub fn note_tool_call_arguments_delta(&mut self, name: Option<&str>, tool_index: u32) -> bool {
         let now = std::time::Instant::now();
@@ -631,6 +729,13 @@ impl AcpUpdateTracker {
     pub(crate) fn backdate_last_tool_call_delta(&mut self, age: std::time::Duration) {
         if let Some((_, at)) = &mut self.writing_tool_call {
             *at = std::time::Instant::now() - age;
+        }
+    }
+    /// Backdate the armed hook phase past the reveal delay without touching its batch identity (handler tests).
+    #[cfg(test)]
+    pub(crate) fn backdate_hooks_running(&mut self, age: std::time::Duration) {
+        if let Some(hooks) = &mut self.hooks_running {
+            hooks.since = std::time::Instant::now() - age;
         }
     }
     /// Take pending ACP commands, if any. Returns `None` if no update arrived since the last drain.
@@ -683,9 +788,9 @@ impl AcpUpdateTracker {
         id
     }
     /// The Edit block of `entry` if it qualifies for coalescing with an adjacent same-file Edit.
-    /// Qualifying means: completed successfully with hunks, a trustworthy one-liner summary, and no per-entry attachments a merge would misplace.
+    /// Qualifying means: completed successfully with hunks and a trustworthy one-liner summary.
     fn coalescable_edit(entry: &ScrollbackEntry) -> Option<&EditToolCallBlock> {
-        if entry.is_running || entry.is_pending_user_input || entry.hook_data.is_some() {
+        if entry.is_running || entry.is_pending_user_input {
             return None;
         }
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
@@ -821,6 +926,13 @@ impl AcpUpdateTracker {
         if self.retry_activity.is_some() {
             self.retry_activity = None;
         }
+        if matches!(
+            update,
+            acp::SessionUpdate::AgentMessageChunk(_) | acp::SessionUpdate::AgentThoughtChunk(_)
+        ) && !self.chunk_predates_hook_batch(meta)
+        {
+            self.hooks_running = None;
+        }
         if let Some(new_start) = meta.stream_start_ms {
             if self
                 .last_stream_start_ms
@@ -915,6 +1027,7 @@ impl AcpUpdateTracker {
         self.last_stream_start_ms = None;
         self.compaction_activity = None;
         self.retry_activity = None;
+        self.hooks_running = None;
         self.writing_tool_call = None;
         self.writing_tool_names.clear();
         self.suppressed_tools.clear();
@@ -1691,6 +1804,9 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
                 .or_else(|| extract_raw_field(tc, "path"))
                 .unwrap_or_else(|| tc.title.clone());
             let mut block = ReadToolCallBlock::new(&path);
+            if is_memory_v2_activity(tc) {
+                block = block.with_memory_activity();
+            }
             if let Some(ref raw) = tc.raw_output
                 && let Ok(ToolOutput::ReadFile(read_output)) =
                     serde_json::from_value::<ToolOutput>(raw.clone())
@@ -1763,6 +1879,9 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             }
             if is_write {
                 block = block.with_prefix("Creating ");
+            }
+            if is_memory_v2_activity(tc) {
+                block = block.with_memory_activity();
             }
             RenderBlock::ToolCall(ToolCallBlock::Edit(block))
         }
@@ -1910,6 +2029,9 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             let meta = extract_search_meta(tc);
             let grep = extract_grep_output(&tc.raw_output).unwrap_or_default();
             let mut block = SearchToolCallBlock::new(pattern);
+            if is_memory_v2_activity(tc) {
+                block = block.with_memory_activity();
+            }
             block.meta = meta;
             block.match_count = grep.match_count;
             block.file_matches = grep.file_matches;
@@ -1944,6 +2066,9 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
         _ if extract_raw_field(tc, "target_directory").is_some() => {
             let path = extract_raw_field(tc, "target_directory").unwrap();
             let mut block = ListDirToolCallBlock::new(make_relative_path(&path));
+            if is_memory_v2_activity(tc) {
+                block = block.with_memory_activity();
+            }
             if let Some(content) = extract_listdir_content(&tc.raw_output) {
                 block = block.with_output(content);
             }
@@ -2121,6 +2246,13 @@ fn canonical_tool_name(tc: &acp::ToolCall) -> Option<&str> {
         .get(xai_grok_tools::tool_taxonomy::TOOL_META_KEY)?
         .get("name")?
         .as_str()
+}
+fn is_memory_v2_activity(tc: &acp::ToolCall) -> bool {
+    tc.meta
+        .as_ref()
+        .and_then(|meta| meta.get("memory_v2_activity"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 /// Display title for a tool call: its title, or the kind name when empty.
 fn tool_call_title(tc: &acp::ToolCall) -> Cow<'_, str> {

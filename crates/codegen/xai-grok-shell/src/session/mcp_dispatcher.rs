@@ -1277,9 +1277,12 @@ mod tests {
                 .expect("ShutdownState mutex poisoned")
                 .is_shutting_down(server)
         }
-        async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+        async fn respawn_stdio(
+            &self,
+            server: &str,
+        ) -> Result<crate::session::mcp_restart::Respawn, String> {
             self.respawn_calls.borrow_mut().push(server.to_string());
-            Ok(())
+            Ok(crate::session::mcp_restart::Respawn::Installed)
         }
         fn push_status(&self, _payload: &crate::session::mcp_dispatcher::McpServerStatusPayload) {}
     }

@@ -620,7 +620,7 @@ impl SessionActor {
             &mut sampling_config,
             suggest_reasoning.effort,
             &self.session_info.id,
-            crate::agent::mvp_agent::reasoning_effort::EffortTarget::SummaryClient,
+            crate::sampling::EffortTarget::SummaryClient,
         );
         let max_output_tokens = crate::util::config::prompt_suggest_reasoning_budget(
             visible_output_tokens,

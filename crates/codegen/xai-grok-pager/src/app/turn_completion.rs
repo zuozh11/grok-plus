@@ -314,43 +314,11 @@ fn open_prompt_blocked_card(
     agent.prompt.set_text("");
 }
 
-/// The folded runs render inline (right-justified) on the marker line instead of as a standalone block.
-/// (Wake turns route through `finish_wake_turn` in acp_handler, which maps their stop reason and calls here only when a marker is due.)
-/// A stamped stash folds only on an exact ending-id match.
-pub(super) fn push_turn_terminal_marker(
-    agent: &mut AgentView,
-    event: Option<SessionEvent>,
-    ending_prompt_id: Option<&str>,
-) {
-    let pending = agent.pending_stop_hooks.take();
-    let groups = match pending {
-        None => Vec::new(),
-        Some(pending) => {
-            let stale = match (pending.prompt_id.as_deref(), ending_prompt_id) {
-                (Some(stashed), Some(ending)) => stashed != ending,
-                (Some(_), None) => true,
-                (None, _) => false,
-            };
-            if stale {
-                for (name, runs) in pending.groups {
-                    agent.scrollback.push_lifecycle_hooks(name, runs);
-                }
-                Vec::new()
-            } else {
-                pending.groups
-            }
-        }
-    };
-
-    match event {
-        Some(event) => {
-            agent.push_end_marker_block(event, groups, ending_prompt_id.map(str::to_string));
-        }
-        None => {
-            for (name, runs) in groups {
-                agent.scrollback.push_lifecycle_hooks(name, runs);
-            }
-        }
+/// Push a turn-terminal marker ("Turn completed/cancelled/failed"); every marker rail routes through here, wake turns
+/// via `finish_wake_turn`. `event == None` (bash turns, rate-limit / re-auth UX that replaces the marker) pushes nothing.
+pub(super) fn push_turn_terminal_marker(agent: &mut AgentView, event: Option<SessionEvent>) {
+    if let Some(event) = event {
+        agent.push_end_marker_block(event);
     }
 }
 
@@ -542,12 +510,6 @@ pub(super) fn finalize_turn_from_terminal(
     // The anchor was back-dated from the authoritative `turnStartMs` on adoption, so this reads the same wall-clock duration the driver shows
     // Missing clock stays `None` (same as the live driver) so we render "Turn completed." rather than "Worked for 0.0s"
     let elapsed_ms = duration_to_elapsed_ms(agent.turn_elapsed());
-    // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-    let ending_prompt_id = agent
-        .session
-        .current_prompt_id
-        .clone()
-        .or_else(|| prompt_id.map(str::to_string));
 
     // Before `finish_turn`: the blocked-prompt requeue reads `in_flight_prompt`, which finish_turn clears
     note_hook_blocked_turn(
@@ -578,7 +540,7 @@ pub(super) fn finalize_turn_from_terminal(
             &agent.scrollback,
         ),
     });
-    push_turn_terminal_marker(agent, event, ending_prompt_id.as_deref());
+    push_turn_terminal_marker(agent, event);
 
     agent.mark_turn_finished(TurnEnd::Completed);
 

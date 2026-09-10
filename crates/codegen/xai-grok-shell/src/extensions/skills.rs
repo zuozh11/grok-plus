@@ -1,6 +1,7 @@
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
+use crate::extensions::agent_runtime::AgentRuntime;
 use crate::util::config as cli_config;
 use xai_grok_agent::prompt::skills::{
     CompatConfig, SkillInfo, SkillsConfig, list_skills_with_plugins,
@@ -265,7 +266,7 @@ fn extra_skill_dirs_from_config() -> Vec<String> {
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]
 pub async fn handle(
-    agent: &crate::agent::mvp_agent::MvpAgent,
+    agent: &dyn AgentRuntime,
     args: &acp::ExtRequest,
     plugin_registry: Option<&xai_grok_agent::plugins::PluginRegistry>,
     compat: CompatConfig,

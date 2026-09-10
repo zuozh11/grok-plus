@@ -127,6 +127,130 @@ fn startup_phases_emit_spans_with_durations() {
     );
 }
 
+#[tracing::instrument(name = "session.spawn", skip_all, fields(start_type = %start_type))]
+async fn fake_spawn_session_actor(start_type: &str) {
+    tracing::info_span!("spawn.actor_setup")
+        .in_scope(|| std::thread::sleep(Duration::from_millis(2)));
+}
+
+fn drive_fake_spawn_under(parent: &tracing::Span) {
+    use tracing::Instrument as _;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("current-thread runtime");
+    let spawn = async {
+        fake_spawn_session_actor("new").await;
+    };
+    rt.block_on(spawn.instrument(parent.clone()));
+}
+
+#[test]
+fn startup_children_fold_under_their_phase_and_subphase() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    reset_for_tests();
+    crate::unified_log::redirect_to_temp_for_tests();
+
+    let folded = crate::span_profile::test_support::folded_with_layer(|| {
+        let _p = begin(Owner::Client);
+
+        enter(StartupPhase::SessionCreate);
+        {
+            let parent = current_phase_span().expect("session_create phase span is open");
+            let _rpc = crate::region!(
+                "startup.session_create.backend_rpc",
+                crate::region::Parent::Explicit(&parent)
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        {
+            let mut timer = crate::instrumentation::timer("session.load_session_replay");
+            timer.with_subphase(Subphase::SessionReplay);
+            let parent = timer
+                .subphase_span()
+                .expect("session_replay subphase span is open");
+            let read = tracing::info_span!(parent: &parent, "startup.session_replay.read_file");
+            read.in_scope(|| std::thread::sleep(Duration::from_millis(2)));
+        }
+
+        {
+            let mut timer = crate::instrumentation::timer("session.spawn_timer");
+            timer.with_subphase(Subphase::SessionSpawn);
+            let ctx = SpawnTraceContext::new(timer.subphase_span(), tracing::Span::current());
+            drive_fake_spawn_under(&ctx.parent);
+        }
+
+        report_total(StartupOutcome::Ok);
+    });
+
+    let paths: Vec<&str> = folded
+        .lines()
+        .filter_map(|l| l.rsplit_once(' ').map(|(p, _)| p))
+        .collect();
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.ends_with("startup.session_create;startup.session_create.backend_rpc")),
+        "backend_rpc must fold under startup.session_create:\n{folded}"
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.ends_with("startup.session_replay;startup.session_replay.read_file")),
+        "replay steps must fold under startup.session_replay:\n{folded}"
+    );
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.ends_with("startup.session_spawn;session.spawn;spawn.actor_setup")),
+        "session.spawn (and its actor-setup child) must fold under startup.session_spawn:\n{folded}"
+    );
+}
+
+#[test]
+fn spawn_children_fold_under_request_span_when_startup_inactive() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    reset_for_tests();
+    crate::unified_log::redirect_to_temp_for_tests();
+    assert!(
+        !is_active(),
+        "no startup timer begun, so startup must be inactive"
+    );
+
+    let folded = crate::span_profile::test_support::folded_with_layer(|| {
+        // Not entered: without an ambient parent, nesting must come from the explicit spawn parent.
+        let request = tracing::info_span!("acp.request");
+        let ctx = SpawnTraceContext::new(None, request.clone());
+        assert_eq!(
+            ctx.parent.id(),
+            request.id(),
+            "inactive startup must fall back to the request span"
+        );
+        drive_fake_spawn_under(&ctx.parent);
+        tracing::info_span!(parent: &ctx.parent, "spawn.history_load")
+            .in_scope(|| std::thread::sleep(Duration::from_millis(2)));
+    });
+
+    let paths: Vec<&str> = folded
+        .lines()
+        .filter_map(|l| l.rsplit_once(' ').map(|(p, _)| p))
+        .collect();
+    assert!(
+        paths.contains(&"acp.request;session.spawn;spawn.actor_setup"),
+        "session.spawn (and its actor-setup child) must nest under the request span:\n{folded}"
+    );
+    assert!(
+        paths.contains(&"acp.request;spawn.history_load"),
+        "history_load must nest under the request span:\n{folded}"
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.split(';').next() == Some("session.spawn")),
+        "session.spawn must not be a trace root:\n{folded}"
+    );
+}
+
 #[test]
 fn agent_run_spans_close_at_discard() {
     use tracing_subscriber::layer::SubscriberExt as _;

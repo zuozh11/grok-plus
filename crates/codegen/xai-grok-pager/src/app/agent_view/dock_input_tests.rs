@@ -9,6 +9,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
@@ -536,7 +537,8 @@ fn stop_click_targets_the_row_under_the_pointer() {
 
 #[test]
 fn every_visible_stop_column_dispatches_and_adjacent_click_opens_row() {
-    for width in [3, 80] {
+    let stop_width = crate::views::dock::Section::Subagents.kill_label().width() as u16;
+    for width in [stop_width, 80] {
         let mut agent = make_agent();
         insert_running_subagent(&mut agent, "child-1");
         agent.dock_shown = true;

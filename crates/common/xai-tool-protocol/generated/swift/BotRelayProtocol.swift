@@ -626,6 +626,9 @@ public let COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: String = "attachment_too_large
 /// `reason` on `command_rejected` when the BotChat upload is not PostProcessDone.
 public let COMMAND_REJECTED_ATTACHMENT_NOT_READY: String = "attachment_not_ready"
 
+/// `reason` on `command_rejected` when the live box gateway refused a well-formed command with its own sentence.
+public let COMMAND_REJECTED_BOX_REFUSED: String = "box_refused"
+
 /// `reason` on `command_rejected` when the box refused a well-formed
 public let COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: String = "gateway/unknown-method"
 
@@ -636,10 +639,36 @@ public func isGatewayMethodUnsupported(_ error: BotRelayError) -> Bool {
 
 // Allowlisted bot-relay command schema (Args+Reply transitive closure).
 // Source: crates/common/xai-grok-bot-upstream/src/generated/{defs,methods}.rs
-// Schema closure: 398 types.
+// Schema closure: 412 types.
 
 public struct ArgsClearTrays: Codable, Sendable, Equatable {
 	public init() {}
+}
+
+public struct ArgsCompleteGithubConnect: Codable, Sendable, Equatable {
+	public let code: String?
+	public let error: String?
+	public let installationId: String?
+	public let setupAction: String?
+	public let state: String
+	public init(code: String? = nil, error: String? = nil, installationId: String? = nil, setupAction: String? = nil, state: String) {
+		self.code = code
+		self.error = error
+		self.installationId = installationId
+		self.setupAction = setupAction
+		self.state = state
+	}
+	enum CodingKeys: String, CodingKey {
+		case code, error, installationId, setupAction, state
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(code, forKey: .code)
+		try container.encodeIfPresent(error, forKey: .error)
+		try container.encodeIfPresent(installationId, forKey: .installationId)
+		try container.encodeIfPresent(setupAction, forKey: .setupAction)
+		try container.encode(state, forKey: .state)
+	}
 }
 
 public struct ArgsCompleteMcpOAuth: Codable, Sendable, Equatable {
@@ -822,6 +851,13 @@ public struct ArgsGetAgentTranscriptTail: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(beforeSeq, forKey: .beforeSeq)
 		try container.encode(id, forKey: .id)
 		try container.encode(limit, forKey: .limit)
+	}
+}
+
+public struct ArgsGetListenerConnectUrl: Codable, Sendable, Equatable {
+	public let platform: String
+	public init(platform: String) {
+		self.platform = platform
 	}
 }
 
@@ -1611,6 +1647,13 @@ public enum ReplyGetBotTemplateForSourceAgent: Codable, Sendable, Equatable {
 		case .sandBotTemplateWireView(let v): try container.encode(v)
 		case .null: try container.encodeNil()
 		}
+	}
+}
+
+public struct ReplyGetListenerConnectUrl: Codable, Sendable, Equatable {
+	public let url: String
+	public init(url: String) {
+		self.url = url
 	}
 }
 
@@ -4589,6 +4632,22 @@ public struct SandGeneratedAvatarImage: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandGithubConnectCompletion: Codable, Sendable, Equatable {
+	public let outcome: SandGithubConnectCompletionOutcome
+	public init(outcome: SandGithubConnectCompletionOutcome) {
+		self.outcome = outcome
+	}
+}
+
+public struct SandGithubConnectCompletionOutcome: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connected = SandGithubConnectCompletionOutcome(rawValue: "connected")
+	public static let failed = SandGithubConnectCompletionOutcome(rawValue: "failed")
+	public static let pendingApproval = SandGithubConnectCompletionOutcome(rawValue: "pending_approval")
+	public static let stale = SandGithubConnectCompletionOutcome(rawValue: "stale")
+}
+
 public struct SandHostSettings: Codable, Sendable, Equatable {
 	public let agentDefaultModel: SandAgentDefaultModel?
 	public let autoReviewInstructions: SandAutoReviewInstructions
@@ -4831,6 +4890,59 @@ public enum SandLinearTriggerEvent: Codable, Sendable, Equatable {
 		case .statusChanged(let v): try v.encode(to: encoder)
 		case .unknown(let v): try v.encode(to: encoder)
 		}
+	}
+}
+
+public struct SandListenerConnectionState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connecting = SandListenerConnectionState(rawValue: "connecting")
+	public static let error = SandListenerConnectionState(rawValue: "error")
+	public static let idle = SandListenerConnectionState(rawValue: "idle")
+	public static let listening = SandListenerConnectionState(rawValue: "listening")
+}
+
+public struct SandListenerIntegration: Codable, Sendable, Equatable {
+	public let detail: String?
+	public let isConnected: Bool
+	public let neededByCount: Double
+	public let platform: SandListenerIntegrationPlatform
+	public let scopeIssues: [TriggerScopeIssue]?
+	public let state: SandListenerConnectionState
+	public init(detail: String? = nil, isConnected: Bool, neededByCount: Double, platform: SandListenerIntegrationPlatform, scopeIssues: [TriggerScopeIssue]? = nil, state: SandListenerConnectionState) {
+		self.detail = detail
+		self.isConnected = isConnected
+		self.neededByCount = neededByCount
+		self.platform = platform
+		self.scopeIssues = scopeIssues
+		self.state = state
+	}
+	enum CodingKeys: String, CodingKey {
+		case detail, isConnected, neededByCount, platform, scopeIssues, state
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(detail, forKey: .detail)
+		try container.encode(isConnected, forKey: .isConnected)
+		try container.encode(neededByCount, forKey: .neededByCount)
+		try container.encode(platform, forKey: .platform)
+		try container.encodeIfPresent(scopeIssues, forKey: .scopeIssues)
+		try container.encode(state, forKey: .state)
+	}
+}
+
+public struct SandListenerIntegrationPlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let github = SandListenerIntegrationPlatform(rawValue: "github")
+	public static let origin = SandListenerIntegrationPlatform(rawValue: "origin")
+	public static let slack = SandListenerIntegrationPlatform(rawValue: "slack")
+}
+
+public struct SandListenerIntegrationsView: Codable, Sendable, Equatable {
+	public let integrations: [SandListenerIntegration]
+	public init(integrations: [SandListenerIntegration]) {
+		self.integrations = integrations
 	}
 }
 
@@ -8837,6 +8949,22 @@ public struct StoredSidebarSection: Codable, Sendable, Equatable {
 	}
 }
 
+public struct TriggerScopeIssue: Codable, Sendable, Equatable {
+	public let kind: TriggerScopeIssueKind
+	public let scope: String
+	public init(kind: TriggerScopeIssueKind, scope: String) {
+		self.kind = kind
+		self.scope = scope
+	}
+}
+
+public struct TriggerScopeIssueKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let botNotInChannel = TriggerScopeIssueKind(rawValue: "bot-not-in-channel")
+	public static let notFound = TriggerScopeIssueKind(rawValue: "not-found")
+}
+
 public typealias ArgsAuthenticateMcpServer = SandMcpAuthenticateRequest
 
 public typealias ArgsCountAgents = ArgsClearTrays
@@ -8870,6 +8998,8 @@ public typealias ArgsGetBotTemplateVersion = SandBotTemplateVersionArgs
 public typealias ArgsGetForeverBoxStatus = SandAsyncTaskLabelParams
 
 public typealias ArgsGetHostSettings = ArgsClearTrays
+
+public typealias ArgsGetListenerIntegrations = ArgsClearTrays
 
 public typealias ArgsGetMcpCatalog = ArgsClearTrays
 
@@ -8918,6 +9048,8 @@ public typealias ArgsSubmitSecret = ArgsRespondToWidget
 public typealias ArgsUploadAttachment = SandUploadAttachmentArgs
 
 public typealias ReplyAuthenticateMcpServer = SandMcpAuthResult
+
+public typealias ReplyCompleteGithubConnect = SandGithubConnectCompletion
 
 public typealias ReplyCompleteMcpOAuth = BotRelayJSONValue
 
@@ -8972,6 +9104,8 @@ public typealias ReplyGetBotTemplateVersion = SandBotTemplateGatewayView
 public typealias ReplyGetForeverBoxStatus = SandForeverBoxStatus?
 
 public typealias ReplyGetHostSettings = SandHostSettings
+
+public typealias ReplyGetListenerIntegrations = SandListenerIntegrationsView
 
 public typealias ReplyGetMcpCatalog = [SandMcpCatalogEntryView]
 
@@ -9075,6 +9209,7 @@ public typealias ReplyAttachUpload = SandUploadAttachmentResult
 public let V1_COMMAND_ALLOWLIST: [String] = [
 	"attachUpload",
 	"authenticateMcpServer",
+	"completeGithubConnect",
 	"completeMcpOAuth",
 	"connectChannel",
 	"countAgents",
@@ -9103,6 +9238,8 @@ public let V1_COMMAND_ALLOWLIST: [String] = [
 	"getBotTemplateVersion",
 	"getForeverBoxStatus",
 	"getHostSettings",
+	"getListenerConnectUrl",
+	"getListenerIntegrations",
 	"getMcpCatalog",
 	"getMcpState",
 	"getSubagents",
@@ -9148,6 +9285,7 @@ public enum BotCommand: Codable, Sendable, Equatable {
 
 	case attachUpload(AttachUpload)
 	case authenticateMcpServer(AuthenticateMcpServer)
+	case completeGithubConnect(CompleteGithubConnect)
 	case completeMcpOAuth(CompleteMcpOAuth)
 	case connectChannel(ConnectChannel)
 	case countAgents(CountAgents)
@@ -9176,6 +9314,8 @@ public enum BotCommand: Codable, Sendable, Equatable {
 	case getBotTemplateVersion(GetBotTemplateVersion)
 	case getForeverBoxStatus(GetForeverBoxStatus)
 	case getHostSettings(GetHostSettings)
+	case getListenerConnectUrl(GetListenerConnectUrl)
+	case getListenerIntegrations(GetListenerIntegrations)
 	case getMcpCatalog(GetMcpCatalog)
 	case getMcpState(GetMcpState)
 	case getSubagents(GetSubagents)
@@ -9231,6 +9371,17 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		public let name: String
 		public let args: SandMcpAuthenticateRequest
 		public init(agentId: String, args: SandMcpAuthenticateRequest, name: String = "authenticateMcpServer") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CompleteGithubConnect: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsCompleteGithubConnect
+		public init(agentId: String, args: ArgsCompleteGithubConnect, name: String = "completeGithubConnect") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -9539,6 +9690,28 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		public let name: String
 		public let args: ArgsClearTrays
 		public init(agentId: String, args: ArgsClearTrays, name: String = "getHostSettings") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetListenerConnectUrl: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetListenerConnectUrl
+		public init(agentId: String, args: ArgsGetListenerConnectUrl, name: String = "getListenerConnectUrl") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetListenerIntegrations: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getListenerIntegrations") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -9970,6 +10143,7 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		switch try container.decode(String.self, forKey: .name) {
 		case "attachUpload": self = .attachUpload(try AttachUpload(from: decoder))
 		case "authenticateMcpServer": self = .authenticateMcpServer(try AuthenticateMcpServer(from: decoder))
+		case "completeGithubConnect": self = .completeGithubConnect(try CompleteGithubConnect(from: decoder))
 		case "completeMcpOAuth": self = .completeMcpOAuth(try CompleteMcpOAuth(from: decoder))
 		case "connectChannel": self = .connectChannel(try ConnectChannel(from: decoder))
 		case "countAgents": self = .countAgents(try CountAgents(from: decoder))
@@ -9998,6 +10172,8 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		case "getBotTemplateVersion": self = .getBotTemplateVersion(try GetBotTemplateVersion(from: decoder))
 		case "getForeverBoxStatus": self = .getForeverBoxStatus(try GetForeverBoxStatus(from: decoder))
 		case "getHostSettings": self = .getHostSettings(try GetHostSettings(from: decoder))
+		case "getListenerConnectUrl": self = .getListenerConnectUrl(try GetListenerConnectUrl(from: decoder))
+		case "getListenerIntegrations": self = .getListenerIntegrations(try GetListenerIntegrations(from: decoder))
 		case "getMcpCatalog": self = .getMcpCatalog(try GetMcpCatalog(from: decoder))
 		case "getMcpState": self = .getMcpState(try GetMcpState(from: decoder))
 		case "getSubagents": self = .getSubagents(try GetSubagents(from: decoder))
@@ -10048,6 +10224,7 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		switch self {
 		case .attachUpload(let v): try v.encode(to: encoder)
 		case .authenticateMcpServer(let v): try v.encode(to: encoder)
+		case .completeGithubConnect(let v): try v.encode(to: encoder)
 		case .completeMcpOAuth(let v): try v.encode(to: encoder)
 		case .connectChannel(let v): try v.encode(to: encoder)
 		case .countAgents(let v): try v.encode(to: encoder)
@@ -10076,6 +10253,8 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		case .getBotTemplateVersion(let v): try v.encode(to: encoder)
 		case .getForeverBoxStatus(let v): try v.encode(to: encoder)
 		case .getHostSettings(let v): try v.encode(to: encoder)
+		case .getListenerConnectUrl(let v): try v.encode(to: encoder)
+		case .getListenerIntegrations(let v): try v.encode(to: encoder)
 		case .getMcpCatalog(let v): try v.encode(to: encoder)
 		case .getMcpState(let v): try v.encode(to: encoder)
 		case .getSubagents(let v): try v.encode(to: encoder)
@@ -10122,6 +10301,7 @@ public enum BotCommand: Codable, Sendable, Equatable {
 public enum BotCommandReplyByName {
 	public typealias AttachUpload = SandUploadAttachmentResult
 	public typealias AuthenticateMcpServer = SandMcpAuthResult
+	public typealias CompleteGithubConnect = SandGithubConnectCompletion
 	public typealias CompleteMcpOAuth = BotRelayJSONValue
 	public typealias ConnectChannel = SandChannelsView
 	public typealias CountAgents = Double
@@ -10150,6 +10330,8 @@ public enum BotCommandReplyByName {
 	public typealias GetBotTemplateVersion = SandBotTemplateGatewayView
 	public typealias GetForeverBoxStatus = SandForeverBoxStatus?
 	public typealias GetHostSettings = SandHostSettings
+	public typealias GetListenerConnectUrl = ReplyGetListenerConnectUrl
+	public typealias GetListenerIntegrations = SandListenerIntegrationsView
 	public typealias GetMcpCatalog = [SandMcpCatalogEntryView]
 	public typealias GetMcpState = SandMcpState
 	public typealias GetSubagents = [SandSubagentInfo]

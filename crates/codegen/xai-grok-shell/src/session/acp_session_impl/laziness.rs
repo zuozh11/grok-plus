@@ -256,7 +256,7 @@ impl SessionActor {
             });
     }
 
-    /// React to a model-switch wakeup from [`crate::agent::models::ModelsManager`].
+    /// React to a model-switch wakeup from [`crate::agent::remote_config::ModelsManager`].
     /// Zeroes `nudges_used_this_session` so the Layer-3 cap is per session and model rather than per session.
     /// Called from the actor's main `select!` loop's `model_switch_rx.changed()` arm and directly by unit tests.
     pub(crate) async fn handle_model_switch_for_laziness(&self, new_gen: u64) {

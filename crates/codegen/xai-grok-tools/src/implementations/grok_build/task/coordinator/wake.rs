@@ -6,7 +6,7 @@ use super::queue::{QueuedCaller, QueuedSpawn, StartOrigin};
 use super::{SubagentCoordinator, SubagentLimitDecision};
 use crate::implementations::grok_build::task::active_message::ActiveMessageIngress;
 use crate::implementations::grok_build::task::coordinator_state::{
-    ChildRunner, DisplacedCompletedChild, MAX_COMPLETED_ENTRIES,
+    ChildRunner, DisplacedCompletedChild, MAX_COMPLETED_ENTRIES, WakeOrigin,
 };
 use crate::implementations::grok_build::task::types::{
     ActiveAgentMessageOutcome, ActiveAgentMessageSource,
@@ -96,6 +96,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 format!("parent-message-{}", uuid::Uuid::now_v7())
             }
         };
+        let wake_origin = WakeOrigin {
+            agent_id: subagent_id.clone(),
+            source: wake_message_source,
+            message_id: message_id.clone(),
+        };
         let parked = ParkedSpawnReadyMessage {
             subagent_id: subagent_id.clone(),
             parent_session_id,
@@ -124,9 +129,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     StartOrigin::Direct,
                     agent_address,
                     spawner_session_id,
-                    Some(subagent_id),
-                    Some(wake_message_source),
-                    Some(message_id),
+                    Some(wake_origin),
                     completed,
                 );
             }
@@ -152,9 +155,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     caller: QueuedCaller::Backgrounded,
                     agent_address,
                     spawner_session_id,
-                    wake_agent_id: Some(subagent_id),
-                    wake_message_source: Some(wake_message_source),
-                    wake_message_id: Some(message_id),
+                    wake_origin: Some(wake_origin),
                     wake: Some(DisplacedCompletedChild {
                         completed: Box::new(completed),
                     }),

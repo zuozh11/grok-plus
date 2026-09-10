@@ -35,6 +35,15 @@ pub enum ActiveAgentMessageOperation {
     Steer,
 }
 
+impl From<ActiveAgentMessageOperation> for xai_message_delivery_core::Operation {
+    fn from(operation: ActiveAgentMessageOperation) -> Self {
+        match operation {
+            ActiveAgentMessageOperation::Queue => xai_message_delivery_core::Operation::Queue,
+            ActiveAgentMessageOperation::Steer => xai_message_delivery_core::Operation::Steer,
+        }
+    }
+}
+
 /// Principal that caused the coordinator to mint an active-child delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveAgentMessageSource {

@@ -549,6 +549,7 @@ fn rehydrate_worktree_from_ref_inner(
     let _ = session_id;
     #[cfg(feature = "metadata")]
     crate::api::register_worktree(
+        None,
         dest,
         source_repo,
         crate::db::WorktreeKind::Subagent,

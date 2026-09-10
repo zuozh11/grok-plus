@@ -8,6 +8,7 @@ mod modes;
 mod notes;
 mod permissions;
 mod prompt;
+mod prompt_ack;
 mod queue_release;
 mod rewind;
 mod router;
@@ -212,6 +213,7 @@ fn test_app() -> AppView {
         command_tags: std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
         welcome_prompt_focused: false,
         home_session_agent: None,
+        optimistic_home_husk: None,
         welcome_tip_typing_dismissed: false,
         welcome_menu_index: None,
         welcome_menu_rects: Vec::new(),

@@ -29,12 +29,6 @@ const TOOL_OVERRIDES_CAPABILITY: ToolOverridesCapability = ToolOverridesCapabili
     x_user_search: false,
     x_thread_fetch: false,
 };
-fn apply_trace_attempt_id(
-    metadata: &mut prod_mc_cli_chat_proxy_types::PromptMetadata,
-    attempt_id: Option<&str>,
-) {
-    metadata.attempt_id = attempt_id.map(str::to_owned);
-}
 fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
@@ -55,7 +49,7 @@ impl MvpAgent {
             return Err(
                 acp::Error::invalid_params()
                     .data(
-                        crate::agent::models::allowlist_denied_message(
+                        crate::agent::remote_config::allowlist_denied_message(
                                 &self.cfg.borrow(),
                             )
                             .to_string(),
@@ -554,7 +548,9 @@ impl acp::Agent for MvpAgent {
                 )
                 .auth_methods(auth_methods)
                 .meta({
-                    let metadata = parse_json_object_env("GROK_AGENT_METADATA");
+                    let metadata = crate::util::parse_json_object_env(
+                        "GROK_AGENT_METADATA",
+                    );
                     serde_json::json!({
                     "grokShell": true,
                     // Re-deriving this precedence client-side has regressed OIDC refresh, so clients consume the agent's choice from here
@@ -1012,7 +1008,7 @@ impl acp::Agent for MvpAgent {
             .await
             .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
         if self.models_manager.allowlist_excludes_all() {
-            let deny = crate::agent::models::allowlist_excludes_all_message(
+            let deny = crate::agent::remote_config::allowlist_excludes_all_message(
                 &self.cfg.borrow(),
             );
             self.send_model_auto_switched(
@@ -1101,6 +1097,10 @@ impl acp::Agent for MvpAgent {
         }
         let dispatch_lock = self.dispatch_lock(&arguments.session_id);
         let dispatch_guard = dispatch_lock.lock().await;
+        crate::agent::mvp_agent::test_hooks::park_forever_if_blackholed(
+                &arguments.session_id,
+            )
+            .await;
         let meta_prompt_mode = arguments
             .meta
             .as_ref()
@@ -1227,7 +1227,7 @@ impl acp::Agent for MvpAgent {
                 sandbox: local_sandbox_telemetry(),
                 ..Default::default()
             });
-            apply_trace_attempt_id(&mut prompt_metadata, ctx.attempt_id.as_deref());
+            prompt_metadata.attempt_id = ctx.attempt_id.clone();
             let (session_copy_tx, session_copy_rx) = oneshot::channel();
             let copy_sent = ctx
                 .session_handle
@@ -2675,40 +2675,7 @@ impl acp::Agent for MvpAgent {
 }
 #[cfg(test)]
 mod tool_overrides_capability_tests {
-    use super::{apply_trace_attempt_id, tool_overrides_capability};
-    use prod_mc_cli_chat_proxy_types::{
-        PromptMetadata, PromptMetadataParams, GCS_SCHEMA_VERSION,
-    };
-    fn metadata() -> PromptMetadata {
-        PromptMetadata::new(PromptMetadataParams {
-            schema_version: GCS_SCHEMA_VERSION.to_owned(),
-            session_id: "session".to_owned(),
-            turn_number: 0,
-            request_id: "request".to_owned(),
-            turn_started_at: "2026-01-01T00:00:00Z".to_owned(),
-            model: "model".to_owned(),
-            host_os: "linux".to_owned(),
-            host_arch: "x86_64".to_owned(),
-            ..Default::default()
-        })
-    }
-    #[test]
-    fn child_trace_metadata_carries_attempt_id() {
-        let mut metadata = metadata();
-        apply_trace_attempt_id(&mut metadata, Some("at1.child"));
-        assert_eq!(metadata.attempt_id.as_deref(), Some("at1.child"));
-        assert_eq!(
-            serde_json::to_value(metadata).unwrap()["attempt_id"],
-            "at1.child"
-        );
-    }
-    #[test]
-    fn root_trace_metadata_omits_attempt_id() {
-        let mut metadata = metadata();
-        apply_trace_attempt_id(&mut metadata, None);
-        assert!(metadata.attempt_id.is_none());
-        assert!(serde_json::to_value(metadata).unwrap().get("attempt_id").is_none());
-    }
+    use super::tool_overrides_capability;
     #[test]
     fn capability_wire_shape_is_pinned() {
         assert_eq!(

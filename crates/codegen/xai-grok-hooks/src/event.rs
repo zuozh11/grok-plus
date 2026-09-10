@@ -578,6 +578,17 @@ pub enum HookPayload {
 }
 
 impl HookPayload {
+    /// The tool a tool-event payload is about; `None` for every other event.
+    pub fn tool_name(&self) -> Option<&str> {
+        match self {
+            Self::PreToolUse { tool_name, .. }
+            | Self::PostToolUse { tool_name, .. }
+            | Self::PostToolUseFailure { tool_name, .. }
+            | Self::PermissionDenied { tool_name, .. } => Some(tool_name),
+            _ => None,
+        }
+    }
+
     pub fn match_value(&self) -> Option<&str> {
         let value = match self {
             Self::PreToolUse { tool_name, .. }

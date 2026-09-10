@@ -293,9 +293,9 @@ impl SessionActor {
             }
             self.inject_deny_read_globs().await;
         }
-        self.mcp_state.lock().await.restart_init();
+        let claim = self.restart_mcp_init(&mut *self.mcp_state.lock().await);
         self.re_register_mcp_tools_on_rebuilt_bridge().await;
-        self.ensure_mcp_tools_initialized().await;
+        self.run_mcp_init_with_claim(claim).await;
         self.deferred_prefix.cancel();
         let new_user_prefix = self
             .build_prefix_after_mcp_wait(self.requires_full_mcp_wait())

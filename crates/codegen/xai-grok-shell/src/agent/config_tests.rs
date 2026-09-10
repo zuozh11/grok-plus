@@ -288,6 +288,15 @@ fn re_resolve_runtime_fields_refreshes_typed_memory_from_raw_config() {
     assert_eq!(cfg.memory_config.unwrap().search.max_results, 12);
 }
 #[test]
+fn resolved_memory_config_retains_v2_mode_while_disabled() {
+    let raw: toml::Value = toml::from_str("[memory]\nenabled = false\nmode = \"v2\"").unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.re_resolve_runtime_fields(&raw);
+    let memory = cfg.memory_config.expect("resolved config is retained");
+    assert!(!memory.enabled);
+    assert_eq!(memory.mode, crate::config::MemoryMode::V2);
+}
+#[test]
 fn resolve_runtime_fields_propagates_disable_web_search() {
     fn ctx(raw: &toml::Value, disable_web_search: bool) -> RuntimeResolutionContext<'_> {
         RuntimeResolutionContext {
@@ -1979,7 +1988,9 @@ fn parses_model_api_backend_chat_completions() {
     assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
 }
 /// Messages backend auto-defaults supports_reasoning_effort=true.
-/// Without this, `--reasoning-effort` is silently dropped in xai-grok-shell/src/agent/models.rs:857 for any BYOK Claude config.
+/// Without this, `--reasoning-effort` is silently dropped by
+/// `model_offers_reasoning_effort` in agent/remote_config/resolution.rs for any
+/// BYOK Claude config.
 #[test]
 fn model_messages_backend_auto_defaults_supports_reasoning_effort() {
     let raw_config: toml::Value = toml::from_str(
@@ -2515,7 +2526,7 @@ fn acp_model_meta_always_has_context_window() {
 }
 #[test]
 fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw_config: toml::Value = toml::from_str(
         r#"
             [model.visible-model]
@@ -2553,7 +2564,7 @@ fn hidden_model_excluded_from_acp_but_kept_in_catalog() {
 }
 #[test]
 fn disabled_models_removed_from_catalog() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2570,7 +2581,7 @@ fn disabled_models_removed_from_catalog() {
 }
 #[test]
 fn hidden_models_kept_in_catalog_but_not_in_acp() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2590,7 +2601,7 @@ fn hidden_models_kept_in_catalog_but_not_in_acp() {
 }
 #[test]
 fn allowed_models_marks_selectable_by_wildcard_key_or_model() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2623,7 +2634,7 @@ fn allowed_models_marks_selectable_by_wildcard_key_or_model() {
 }
 #[test]
 fn allowed_models_empty_is_unrestricted() {
-    use crate::agent::models::resolve_model_catalog;
+    use crate::agent::remote_config::resolve_model_catalog;
     let raw: toml::Value = toml::from_str(
         r#"
             [models]
@@ -2643,7 +2654,7 @@ fn allowed_models_empty_is_unrestricted() {
 }
 #[test]
 fn invalid_glob_is_rejected_by_validation() {
-    use crate::agent::models::ModelGlobSet;
+    use crate::agent::remote_config::ModelGlobSet;
     assert!(ModelGlobSet::compile(Some(["grok[".to_string()].as_slice())).is_err());
     let raw: toml::Value = toml::from_str(
         r#"
@@ -2663,7 +2674,7 @@ fn invalid_glob_is_rejected_by_validation() {
 }
 #[test]
 fn supported_in_api_false_hides_from_api_key_users() {
-    use crate::agent::models::{available_models, resolve_model_catalog};
+    use crate::agent::remote_config::{available_models, resolve_model_catalog};
     let raw: toml::Value = toml::from_str(
         r#"
             [model.oauth-only-model]

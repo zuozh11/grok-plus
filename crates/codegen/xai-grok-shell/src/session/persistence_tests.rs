@@ -433,19 +433,21 @@ async fn aborted_wake_queued_behind_actor_delay_keeps_prior_summary() {
     storage
         .update_wake_start(
             &info,
-            WakeSummaryState {
-                attempt_id: None,
-                next_trace_turn: 0,
-                current_model_id: default_model_id(),
+            WakeStart {
+                prior: WakeSummaryState {
+                    attempt_id: None,
+                    next_trace_turn: 0,
+                    current_model_id: default_model_id(),
+                    agent_name: None,
+                    reasoning_effort: None,
+                    summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
+                },
+                attempt_id: "at1.prior".into(),
+                next_trace_turn: 7,
+                model_id: default_model_id(),
                 agent_name: None,
                 reasoning_effort: None,
-                summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
             },
-            "at1.prior".into(),
-            7,
-            default_model_id(),
-            None,
-            None,
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -469,19 +471,21 @@ async fn aborted_wake_queued_behind_actor_delay_keeps_prior_summary() {
         .handle
         .tx
         .send(PersistenceMsg::WakeStart {
-            prior: WakeSummaryState {
-                attempt_id: Some("at1.prior".into()),
-                next_trace_turn: 7,
-                current_model_id: default_model_id(),
+            start: WakeStart {
+                prior: WakeSummaryState {
+                    attempt_id: Some("at1.prior".into()),
+                    next_trace_turn: 7,
+                    current_model_id: default_model_id(),
+                    agent_name: None,
+                    reasoning_effort: None,
+                    summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
+                },
+                attempt_id: "at1.aborted".into(),
+                next_trace_turn: 8,
+                model_id: default_model_id(),
                 agent_name: None,
                 reasoning_effort: None,
-                summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
             },
-            attempt_id: "at1.aborted".into(),
-            next_trace_turn: 8,
-            model_id: default_model_id(),
-            agent_name: None,
-            reasoning_effort: None,
             abort: abort.clone(),
             respond_to: start_reply,
         })
@@ -533,19 +537,21 @@ async fn acknowledged_wake_start_stamps_summary_once() {
     storage
         .update_wake_start(
             &info,
-            WakeSummaryState {
-                attempt_id: None,
-                next_trace_turn: 0,
-                current_model_id: default_model_id(),
+            WakeStart {
+                prior: WakeSummaryState {
+                    attempt_id: None,
+                    next_trace_turn: 0,
+                    current_model_id: default_model_id(),
+                    agent_name: None,
+                    reasoning_effort: None,
+                    summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
+                },
+                attempt_id: "at1.prior".into(),
+                next_trace_turn: 7,
+                model_id: default_model_id(),
                 agent_name: None,
                 reasoning_effort: None,
-                summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
             },
-            "at1.prior".into(),
-            7,
-            default_model_id(),
-            None,
-            None,
             tokio_util::sync::CancellationToken::new(),
         )
         .await
@@ -557,19 +563,21 @@ async fn acknowledged_wake_start_stamps_summary_once() {
         .handle
         .tx
         .send(PersistenceMsg::WakeStart {
-            prior: WakeSummaryState {
-                attempt_id: Some("at1.prior".into()),
-                next_trace_turn: 7,
-                current_model_id: default_model_id(),
-                agent_name: None,
-                reasoning_effort: None,
-                summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
+            start: WakeStart {
+                prior: WakeSummaryState {
+                    attempt_id: Some("at1.prior".into()),
+                    next_trace_turn: 7,
+                    current_model_id: default_model_id(),
+                    agent_name: None,
+                    reasoning_effort: None,
+                    summary_bytes: std::fs::read(dir.path().join("summary.json")).unwrap(),
+                },
+                attempt_id: "at1.started".into(),
+                next_trace_turn: 8,
+                model_id: wake_model.clone(),
+                agent_name: Some("wake-agent".into()),
+                reasoning_effort: Some(Some(xai_grok_sampling_types::ReasoningEffort::High)),
             },
-            attempt_id: "at1.started".into(),
-            next_trace_turn: 8,
-            model_id: wake_model.clone(),
-            agent_name: Some("wake-agent".into()),
-            reasoning_effort: Some(Some(xai_grok_sampling_types::ReasoningEffort::High)),
             abort: tokio_util::sync::CancellationToken::new(),
             respond_to,
         })

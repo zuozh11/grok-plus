@@ -995,9 +995,31 @@ impl PromptWidget {
         self.textarea.text()
     }
 
+    /// Nothing recoverable remains: text, live images, chips, or Ctrl+U undo stash.
+    /// Matches [`StashedPrompt::is_effectively_empty`].
+    pub(crate) fn is_effectively_empty(&self) -> bool {
+        self.text().trim().is_empty()
+            && self.images.is_empty()
+            && self.textarea.elements().is_empty()
+            && self.image_undo_stash.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_image_undo_stash_for_test(
+        &mut self,
+        image: crate::prompt_images::PastedImage,
+    ) {
+        self.image_undo_stash.push(image);
+    }
+
     /// Get the current cursor position (byte offset into text).
     pub fn cursor(&self) -> usize {
         self.textarea.cursor()
+    }
+
+    /// Active selection as a byte range (normalized, char-boundary safe), or `None` when nothing is selected.
+    pub(crate) fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        self.textarea.selection_range()
     }
 
     /// Clear the undo/redo history (see [`TextArea::clear_history`]).
@@ -3170,24 +3192,66 @@ impl PromptWidget {
                     None => theme.muted().bg(bg),
                 }
                 .add_modifier(Modifier::ITALIC);
-            if self.textarea.text().is_empty() {
+            if crate::voice::prompt_blank_for_voice(self.textarea.text()) {
                 let lines =
                     wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
                 for (i, line) in lines.iter().enumerate() {
                     buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
                 }
             } else {
-                // Ghost suffix after the finalized draft (not at the caret).
-                let end = self.textarea.text().len();
+                // Ghost preview of the interim inserted at the caret, or replacing the active selection.
+                // Uses the same selection-aware insertion point and spacing rule
+                // (crate::voice::space_voice_fragment) as the real insertion so preview and result cannot drift.
+                let text = self.textarea.text();
+                let (base, at, tail_at) = match self.textarea.selection_range() {
+                    Some(sel) => (
+                        std::borrow::Cow::Owned(format!(
+                            "{}{}",
+                            &text[..sel.start],
+                            &text[sel.end..]
+                        )),
+                        sel.start,
+                        sel.end,
+                    ),
+                    None => {
+                        let cursor = self.textarea.cursor();
+                        (std::borrow::Cow::Borrowed(text), cursor, cursor)
+                    }
+                };
+                let display = crate::voice::space_voice_fragment(&base, at, interim);
+
                 if let Some((start_x, row_y)) =
                     self.textarea
-                        .screen_position_of(end, ta_area, self.textarea_state)
+                        .screen_position_of(at, ta_area, self.textarea_state)
                 {
-                    let display = format!(" {interim}");
-                    let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                    let row_right = ta_area.x + ta_area.width;
+                    let avail = row_right.saturating_sub(start_x) as usize;
                     if avail > 0 {
+                        // The textarea already painted the full draft: snapshot the cells after the insertion
+                        // point (selection end, or caret), paint the interim over the span, then re-blit that tail
+                        // shifted right by the ghost's width, so the prompt reads as pushed aside and a selection as replaced; a multi-row selection falls back to the caret row.
+                        let tail_x = self
+                            .textarea
+                            .screen_position_of(tail_at, ta_area, self.textarea_state)
+                            .filter(|(_, ty)| *ty == row_y)
+                            .map_or(start_x, |(tx, _)| tx.max(start_x));
+                        let saved: Vec<ratatui::buffer::Cell> = (tail_x..row_right)
+                            .map(|x| buf.cell((x, row_y)).cloned().unwrap_or_default())
+                            .collect();
                         let truncated = crate::render::line_utils::truncate_str(&display, avail);
+                        let ghost_w =
+                            unicode_width::UnicodeWidthStr::width(truncated.as_str()) as u16;
                         buf.set_string(start_x, row_y, &truncated, interim_style);
+                        let mut x = start_x.saturating_add(ghost_w);
+                        for cell in saved {
+                            if x >= row_right {
+                                break;
+                            }
+                            if let Some(dst) = buf.cell_mut((x, row_y)) {
+                                *dst = cell;
+                            }
+                            x = x.saturating_add(1);
+                        }
                     }
                 }
             }

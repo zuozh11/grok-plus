@@ -760,6 +760,8 @@ pub struct EditToolCallBlock {
     change_counts: (usize, usize),
     /// Hunk-only first paint; may upgrade to FileScoped via the edit-HL worker.
     pub highlight: EditHighlightPhase,
+    /// Whether this ordinary edit targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 fn workflow_script_name(path: &str) -> Option<String> {
@@ -801,7 +803,13 @@ impl EditToolCallBlock {
             summary_untrusted: false,
             change_counts,
             highlight: EditHighlightPhase::HunkOnly,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_prefix(mut self, prefix: &'static str) -> Self {

@@ -357,8 +357,6 @@ pub enum SessionCommand {
     },
     /// Admit an owning parent's message as an ordinary protected turn or running-turn Steer.
     ParentAgentMessage {
-        #[allow(private_interfaces)]
-        principal: crate::session::message_delivery::ActiveMessagePrincipal,
         delivery:
             xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery,
         #[allow(private_interfaces)]
@@ -645,8 +643,23 @@ pub enum SessionCommand {
     ListTasks {
         respond_to: oneshot::Sender<Option<Vec<xai_grok_tools::types::TaskSnapshot>>>,
     },
-    /// Query whether the session has work in flight: a running turn (`running_task.is_some()`) **or** queued inputs (`pending_inputs` non-empty).
-    /// Used by the leader's idle-unload decision on client disconnect to avoid unloading a session that still has pending work.
+    /// Persist + broadcast the current background-task list via
+    /// `x.ai/session_notification` (`SessionUpdate::BackgroundTasks`).
+    ///
+    /// `respond_to` means load enqueued the persist+broadcast before returning.
+    /// It is not a client-delivery ack. Live incremental follow-ups leave it `None`.
+    ///
+    /// `pending` is the bridge coalesce bit. Live incrementals pass `Some` so
+    /// a burst collapses to one emit; load leaves it `None` (forced flush).
+    EmitBackgroundTasksSnapshot {
+        respond_to: Option<oneshot::Sender<()>>,
+        pending: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    },
+    /// Query whether the session has work in flight: a running turn
+    /// (`running_task.is_some()`) **or** queued inputs
+    /// (`pending_inputs` non-empty). Used by the leader's idle-unload decision
+    /// on client disconnect (the no-evict keystone) to avoid unloading a
+    /// session that still has pending work.
     IsBusy {
         respond_to: oneshot::Sender<bool>,
     },

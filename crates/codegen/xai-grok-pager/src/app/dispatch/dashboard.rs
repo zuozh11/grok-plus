@@ -2577,7 +2577,7 @@ pub(super) fn dispatch_dashboard_select(app: &mut AppView, next: bool) {
     // Actions-row button navigation contract:
     //   - Down moves to the first focusable section or row
     //   - Up stays on the current actions-row button
-    if d.new_agent_button_focused || d.open_session_button_focused {
+    if d.actions_focus.is_some() {
         if next && !focusables.is_empty() {
             set_cursor(d, &focusables[0]);
             d.clear_manual_scroll();

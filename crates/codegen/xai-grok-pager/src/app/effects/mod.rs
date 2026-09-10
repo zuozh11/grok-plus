@@ -9,7 +9,9 @@ use super::worktree_session;
 use super::{agent, dispatch};
 pub use helpers::CompactError;
 pub use session_list::ConversationsPartial;
-pub(super) use helpers::parse_session_load_running_prompt_id;
+pub(super) use helpers::{
+    parse_session_load_running_prompt_id, parse_session_memory_mode,
+};
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, acp_send_bounded, compact_error,
     is_disk_full_error, parse_worktree_restore_payload, parse_worktree_strategy_summary,
@@ -243,14 +245,31 @@ pub(crate) fn execute(
                         Some(serde_json::json!({"mcp_server_count": mcp_count})),
                     );
                     let create_start = std::time::Instant::now();
-                    let result = helpers::acp_send_bounded(
-                            acp::NewSessionRequest::new(session_cwd)
-                                .mcp_servers(mcp_servers)
-                                .meta(meta),
-                            &tx,
-                            "Session creation",
+                    let create_phase_span = xai_grok_telemetry::startup::current_phase_span();
+                    let result = {
+                        let _rpc_span = match create_phase_span.as_ref() {
+                            Some(parent) => {
+                                xai_grok_telemetry::region!(
+                            "startup.session_create.backend_rpc",
+                            xai_grok_telemetry::region::Parent::Explicit(parent)
                         )
-                        .await;
+                            }
+                            None => {
+                                xai_grok_telemetry::region!(
+                            "session.create.backend_rpc",
+                            xai_grok_telemetry::region::Parent::Inherit
+                        )
+                            }
+                        };
+                        helpers::acp_send_bounded(
+                                acp::NewSessionRequest::new(session_cwd)
+                                    .mcp_servers(mcp_servers)
+                                    .meta(meta),
+                                &tx,
+                                "Session creation",
+                            )
+                            .await
+                    };
                     let create_elapsed_ms = create_start.elapsed().as_millis() as u64;
                     match result {
                         Ok(resp) => {
@@ -264,10 +283,14 @@ pub(crate) fn execute(
                             }),
                                 ),
                             );
-                            TaskResult::SessionCreated {
+                            TaskResult::WithPinnedMemoryMode {
                                 agent_id,
-                                session_id: resp.session_id,
-                                models: resp.models,
+                                memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
+                                result: Box::new(TaskResult::SessionCreated {
+                                    agent_id,
+                                    session_id: resp.session_id,
+                                    models: resp.models,
+                                }),
                             }
                         }
                         Err(e) => {
@@ -418,13 +441,17 @@ pub(crate) fn execute(
                         .await;
                     match result {
                         Ok(resp) => {
-                            TaskResult::WorktreeSessionCreated {
+                            TaskResult::WithPinnedMemoryMode {
                                 agent_id,
-                                session_id: resp.session_id,
-                                worktree_path: worktree_root,
-                                session_cwd,
-                                models: resp.models,
-                                strategy_summary,
+                                memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
+                                result: Box::new(TaskResult::WorktreeSessionCreated {
+                                    agent_id,
+                                    session_id: resp.session_id,
+                                    worktree_path: worktree_root,
+                                    session_cwd,
+                                    models: resp.models,
+                                    strategy_summary,
+                                }),
                             }
                         }
                         Err(e) => {
@@ -488,14 +515,18 @@ pub(crate) fn execute(
                             let running_prompt_id = parse_session_load_running_prompt_id(
                                 resp.meta.as_ref(),
                             );
-                            TaskResult::SessionLoaded {
+                            TaskResult::WithPinnedMemoryMode {
                                 agent_id,
-                                session_id: acp_session_id,
-                                models: resp.models,
-                                code_restored,
-                                restore_summary,
-                                restore_degree,
-                                running_prompt_id,
+                                memory_mode: parse_session_memory_mode(resp.meta.as_ref()),
+                                result: Box::new(TaskResult::SessionLoaded {
+                                    agent_id,
+                                    session_id: acp_session_id,
+                                    models: resp.models,
+                                    code_restored,
+                                    restore_summary,
+                                    restore_degree,
+                                    running_prompt_id,
+                                }),
                             }
                         }
                         Err(e) => {
@@ -1397,17 +1428,16 @@ pub(crate) fn execute(
                         ),
                     );
                     let send_start = std::time::Instant::now();
-                    let mut meta = serde_json::json!({ "cancelSubagents": cancel_subagents });
-                    if let Some(t) = trigger_str {
-                        meta[crate::app::turn_completion::CANCEL_TRIGGER_KEY] = t.into();
-                    }
-                    if let Some(pid) = rewind_prompt_id {
-                        meta["rewindIfNoOutput"] = true.into();
-                        meta["rewindIfPristine"] = true.into();
-                        meta["promptId"] = pid.into();
-                    }
                     let req = acp::CancelNotification::new(session_id.clone())
-                        .meta(meta.as_object().cloned());
+                        .meta(
+                            Some(
+                                cancel_notification_meta(
+                                    cancel_subagents,
+                                    trigger_str,
+                                    rewind_prompt_id.as_deref(),
+                                ),
+                            ),
+                        );
                     let result = acp_send(req, &tx).await;
                     ulog::info(
                         "cancel.acp_send.done",
@@ -4179,19 +4209,20 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SaveMemoryNote { agent_id, text, cwd } => {
+        Effect::SaveMemoryNote { agent_id, text, cwd, pinned_mode } => {
             tasks
                 .spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                            let storage = xai_grok_shell::session::memory::MemoryStorage::new(
+                            let mode = match pinned_mode {
+                                Some(mode) => mode,
+                                None => xai_grok_shell::config::load_memory_mode()?,
+                            };
+                            let storage = xai_grok_shell::session::memory::MemoryStorage::new_for_mode(
                                 &cwd,
                                 None,
+                                mode,
                             );
-                            storage
-                                .append_to_memory(
-                                    xai_grok_shell::session::memory::MemoryScope::Global,
-                                    &text,
-                                )
+                            storage.save_remember_note(&text)
                         })
                         .await
                         .map_err(|e| format!("task join error: {e}"))
@@ -5285,6 +5316,28 @@ fn prompt_request_meta(
         map.insert("screenMode".into(), serde_json::Value::String(mode.into()));
     }
     serde_json::Value::Object(map)
+}
+/// Build the `session/cancel` `_meta`, shared by the TUI cancel effect and the headless fail-safe so the wire shape has one owner.
+/// The rewind is a request, not a command: the shell re-checks rewindable and prompt identity.
+pub(crate) fn cancel_notification_meta(
+    cancel_subagents: bool,
+    trigger: Option<&str>,
+    rewind_prompt_id: Option<&str>,
+) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert("cancelSubagents".into(), cancel_subagents.into());
+    if let Some(trigger) = trigger {
+        meta.insert(
+            crate::app::turn_completion::CANCEL_TRIGGER_KEY.into(),
+            trigger.into(),
+        );
+    }
+    if let Some(pid) = rewind_prompt_id {
+        meta.insert("rewindIfNoOutput".into(), true.into());
+        meta.insert("rewindIfPristine".into(), true.into());
+        meta.insert("promptId".into(), pid.into());
+    }
+    meta
 }
 pub(crate) const REWIND_MODE_WIRE: &str = "conversation_only";
 pub(crate) fn rewind_execute_params(

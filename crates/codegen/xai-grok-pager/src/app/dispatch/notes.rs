@@ -659,6 +659,11 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
     } else {
         return vec![];
     };
+    let pinned_mode = agent
+        .session
+        .session_id
+        .as_ref()
+        .map(|_| agent.memory_mode.unwrap_or_default());
 
     agent.active_modal = None;
     agent
@@ -669,6 +674,7 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
         agent_id: id,
         text: content,
         cwd,
+        pinned_mode,
     }]
 }
 
@@ -911,10 +917,9 @@ pub(super) fn handle_memory_note_saved(
             Ok(()) => {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Memory saved to {}",
-                        crate::util::display_user_grok_path("memory/MEMORY.md")
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Memory note saved".to_string(),
+                    ));
             }
             Err(error) => {
                 agent

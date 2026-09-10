@@ -1,4 +1,5 @@
 use super::*;
+use crate::scrollback::blocks::tool::VerbGroupKind;
 use std::sync::Arc;
 /// Default meta with no timestamps (simulates old grok-shell or tests that don't care about timing).
 fn meta() -> NotificationMeta {
@@ -13,6 +14,12 @@ fn thought_chunk(text: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
         acp::TextContent::new(text.to_string()),
     )))
+}
+fn batch(event_name: &str, tool_name: Option<&str>) -> HookBatchId {
+    HookBatchId {
+        event_name: event_name.into(),
+        tool_name: tool_name.map(str::to_string),
+    }
 }
 #[test]
 fn workflow_suppression_keeps_authoring_calls_visible() {
@@ -2322,6 +2329,89 @@ fn execute_block_keeps_full_command_sets_header_display_when_peeled() {
     assert!(
         searchable.contains("cd /proj && echo hi"),
         "searchable_text must retain full command: {searchable}"
+    );
+}
+#[test]
+fn memory_v2_metadata_groups_ordinary_file_activity_without_losing_details() {
+    let memory_meta = Some(
+        serde_json::json!({ "memory_v2_activity": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let make_call = |id: &'static str, kind, title: &str, raw_input| {
+        acp::ToolCall::new(acp::ToolCallId::new(Arc::from(id)), title.to_string())
+            .kind(kind)
+            .status(acp::ToolCallStatus::Pending)
+            .raw_input(Some(raw_input))
+            .meta(memory_meta.clone())
+            .content(vec![])
+            .locations(vec![])
+    };
+    let read = make_call(
+        "memory-read",
+        acp::ToolKind::Read,
+        "Read memory",
+        serde_json::json!({ "path": "/memory-v2/global/topics/rust.md" }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Read(read)) = tool_call_to_block(&read, None) else {
+        panic!("expected read block");
+    };
+    assert_eq!(read.path, "/memory-v2/global/topics/rust.md");
+    assert_eq!(
+        ToolCallBlock::Read(read).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let edit = make_call(
+        "memory-edit",
+        acp::ToolKind::Edit,
+        "Edit memory",
+        serde_json::json!({
+            "path": "/memory-v2/global/topics/rust.md",
+            "old_string": "old",
+            "new_string": "new"
+        }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = tool_call_to_block(&edit, None) else {
+        panic!("expected edit block");
+    };
+    assert_eq!(edit.path, "/memory-v2/global/topics/rust.md");
+    assert_eq!(
+        ToolCallBlock::Edit(edit).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let search = make_call(
+        "memory-search",
+        acp::ToolKind::Search,
+        "Search memory",
+        serde_json::json!({
+            "pattern": "Rust",
+            "path": "/memory-v2/global/topics"
+        }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::Search(search)) = tool_call_to_block(&search, None)
+    else {
+        panic!("expected search block");
+    };
+    assert_eq!(search.pattern, "Rust");
+    assert_eq!(
+        ToolCallBlock::Search(search).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
+    );
+    let list = make_call(
+        "memory-list",
+        acp::ToolKind::Other,
+        "List memory",
+        serde_json::json!({ "target_directory": "/memory-v2/global/topics" }),
+    );
+    let RenderBlock::ToolCall(ToolCallBlock::ListDir(list)) = tool_call_to_block(&list, None)
+    else {
+        panic!("expected list block");
+    };
+    assert!(list.path.contains("/memory-v2/global/topics"));
+    assert_eq!(
+        ToolCallBlock::ListDir(list).verb_group_kind(),
+        Some(VerbGroupKind::MemorySearch)
     );
 }
 #[test]
@@ -4804,4 +4894,179 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
         "upsell text must be shown in the card body, got: {:?}",
         block.output
     );
+}
+/// A hook batch younger than the reveal delay is invisible; once it outlives the delay it outranks the phase it blocks.
+#[test]
+fn hooks_running_reveals_only_after_delay_and_outranks_thinking() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(thought_chunk("planning"), &meta(), &mut sb);
+    assert_eq!(tracker.activity(), Some(TurnActivity::Thinking));
+    tracker.set_hooks_running(batch("pre_tool_use", None), 1, None);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Thinking),
+        "a fresh batch must not flash into the spinner"
+    );
+    assert!(
+        !tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "ending an unrevealed batch changes nothing on screen"
+    );
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    tracker.set_hooks_running_since(batch("pre_tool_use", None), 1, revealed, None);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks {
+            event_name: "pre_tool_use".into(),
+            count: 1,
+        })),
+        "a batch past the reveal delay names what the turn is blocked on"
+    );
+    assert!(
+        tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "ending a revealed batch must request a redraw"
+    );
+    assert_eq!(tracker.activity(), Some(TurnActivity::Thinking));
+}
+/// Streaming data after the batch means it finished even if its `HookExecution` was dropped or deferred.
+#[test]
+fn hooks_running_auto_clears_on_streaming_data_and_turn_end() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    tracker.set_hooks_running_since(batch("user_prompt_submit", None), 2, revealed, None);
+    assert!(matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
+    tracker.handle_update(agent_chunk("hello"), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(TurnActivity::Responding),
+        "the first chunk after the gate clears the hook phase"
+    );
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, None);
+    tracker.finish_turn(&mut sb);
+    assert_eq!(tracker.activity(), None, "finish_turn drops the phase");
+}
+/// The spinner copy: singular for one hook, a count otherwise; never the handler's config path.
+#[test]
+fn hooks_waiting_label_counts_hooks() {
+    let one = WaitingReason::Hooks {
+        event_name: "pre_tool_use".into(),
+        count: 1,
+    };
+    let many = WaitingReason::Hooks {
+        event_name: "stop".into(),
+        count: 3,
+    };
+    assert_eq!(one.label(), "Running pre_tool_use hook…");
+    assert_eq!(many.label(), "Running 3 stop hooks…");
+    assert_eq!(one.as_telemetry_label(), "waiting_hooks");
+}
+/// The gated tool's Pending row, its late args delta, sibling progress and mode/commands refreshes leave the phase alone; the batch's outcome or model output ends it.
+#[test]
+fn hook_gate_survives_tool_rows_and_ends_on_its_outcome() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    let gate = TurnActivity::Waiting(WaitingReason::Hooks {
+        event_name: "pre_tool_use".into(),
+        count: 2,
+    });
+    tracker.handle_update(
+        tool_call("bg", acp::ToolKind::Execute, "bash"),
+        &meta(),
+        &mut sb,
+    );
+    tracker.set_hooks_running_since(batch("pre_tool_use", None), 2, revealed, None);
+    tracker.note_tool_call_arguments_delta(Some("list_dir"), 0);
+    tracker.handle_update(
+        tool_call("t1", acp::ToolKind::Read, "list_dir"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(
+        tracker.activity(),
+        Some(gate.clone()),
+        "the gate outranks the tool it is gating and its late args delta"
+    );
+    tracker.handle_update(tool_update_completed("bg"), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate.clone()),
+        "another tool's progress says nothing about the gate"
+    );
+    tracker.handle_update(
+        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+            acp::SessionModeId::new("plan"),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    tracker.handle_update(available_commands_update(&["help"]), &meta(), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate),
+        "a mode toggle or commands refresh says nothing about the gate"
+    );
+    assert!(
+        !tracker.clear_hooks_running(&batch("session_start", None)),
+        "another batch's outcome says nothing about this gate"
+    );
+    assert!(
+        tracker.clear_hooks_running(&batch("pre_tool_use", None)),
+        "the batch outcome ends it"
+    );
+    assert!(!matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
+    tracker.set_hooks_running_since(batch("post_tool_use", None), 1, revealed, None);
+    tracker.handle_update(agent_chunk("done"), &meta(), &mut sb);
+    assert!(
+        !matches!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+        ),
+        "model output means the shell moved past the gate"
+    );
+}
+/// A text chunk stamped at or before the batch start is a buffered straggler and must not end the phase; a later one does.
+#[test]
+fn hook_gate_survives_a_text_chunk_stamped_before_the_batch() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let revealed = std::time::Instant::now() - HOOK_REVEAL_DELAY;
+    let gate = TurnActivity::Waiting(WaitingReason::Hooks {
+        event_name: "stop".into(),
+        count: 1,
+    });
+    let stamped = |ms: i64| NotificationMeta {
+        agent_timestamp_ms: Some(ms),
+        ..meta()
+    };
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, Some(1_000));
+    tracker.handle_update(agent_chunk("final words"), &stamped(1_000), &mut sb);
+    tracker.handle_update(thought_chunk("trailing"), &stamped(998), &mut sb);
+    assert_eq!(
+        tracker.activity(),
+        Some(gate),
+        "text stamped at or before the batch start was already queued when the gate opened"
+    );
+    tracker.handle_update(agent_chunk("after"), &stamped(1_001), &mut sb);
+    assert!(
+        !matches!(
+            tracker.activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+        ),
+        "text stamped after the batch start means the shell moved past the gate"
+    );
+    tracker.set_hooks_running_since(batch("stop", None), 1, revealed, None);
+    tracker.handle_update(agent_chunk("x"), &stamped(1), &mut sb);
+    assert!(!matches!(
+        tracker.activity(),
+        Some(TurnActivity::Waiting(WaitingReason::Hooks { .. }))
+    ));
 }

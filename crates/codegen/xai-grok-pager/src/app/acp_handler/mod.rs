@@ -148,6 +148,17 @@ fn is_replay_bash_execute(update: &acp::SessionUpdate) -> bool {
         == Some(true)
 }
 
+/// Any live update stamped with the awaited prompt id proves the shell accepted it, whichever branch applies it.
+fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
+    if !meta.is_replay {
+        view.ack_prompt_if_named(
+            meta.prompt_id.as_deref(),
+            crate::app::prompt_ack::AckSignal::SessionUpdate,
+            std::time::Instant::now(),
+        );
+    }
+}
+
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
         AcpClientMessage::SessionNotification(notif) => {
@@ -175,6 +186,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     {
                         agent.last_applied_event_seq = Some(seq);
                     }
+                    ack_prompt_from_update(agent, &meta);
 
                     if drop_unexpected_replay(
                         agent,
@@ -406,6 +418,8 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         let child_view = parent
                             .child_view_for_live_update_mut(child_key)
                             .expect("find_session_match returned an existing subagent_views key");
+                        // An overlay prompt arms the watch on this child, so the child's own updates must disarm it
+                        ack_prompt_from_update(child_view, &meta);
                         if let Some(tokens) = meta.total_tokens {
                             confirm_context_used(child_view, tokens);
                         }

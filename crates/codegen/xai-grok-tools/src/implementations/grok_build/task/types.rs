@@ -243,12 +243,6 @@ pub fn sanitize_cwd_value(s: &str) -> Option<String> {
     Some(shellexpand::tilde(cleaned).into_owned())
 }
 
-/// Returns `true` if the string looks like a real subagent ID rather than a
-/// model-emitted placeholder (`""`, `"null"`, `"none"`, `"undefined"`, whitespace).
-pub fn is_valid_resume_id(s: &str) -> bool {
-    is_not_sentinel(s)
-}
-
 /// Extension methods for [`SubagentCapabilityMode`] that depend on this crate's
 /// tool-config internals (`ToolKind` / `ToolServerConfig`).
 pub trait SubagentCapabilityModeExt {
@@ -467,6 +461,45 @@ impl Default for SubagentResult {
 }
 
 impl SubagentResult {
+    #[must_use]
+    pub fn failed(
+        subagent_id: impl Into<String>,
+        child_session_id: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        SubagentResult {
+            error: Some(error.into()),
+            subagent_id: subagent_id.into(),
+            child_session_id: child_session_id.into(),
+            ..SubagentResult::default()
+        }
+    }
+
+    #[must_use]
+    pub fn cancelled(
+        subagent_id: impl Into<String>,
+        child_session_id: impl Into<String>,
+        error: impl Into<String>,
+    ) -> Self {
+        SubagentResult {
+            cancelled: true,
+            ..SubagentResult::failed(subagent_id, child_session_id, error)
+        }
+    }
+
+    #[must_use]
+    pub fn backgrounded(
+        subagent_id: impl Into<String>,
+        child_session_id: impl Into<String>,
+    ) -> Self {
+        SubagentResult {
+            backgrounded: true,
+            subagent_id: subagent_id.into(),
+            child_session_id: child_session_id.into(),
+            ..SubagentResult::default()
+        }
+    }
+
     /// Terminal status string: `"cancelled"`, `"completed"`, or `"failed"`.
     pub fn status(&self) -> &'static str {
         if self.cancelled {
@@ -891,7 +924,6 @@ pub struct SubagentDescribeRequest {
 pub enum SubagentEvent {
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
-    SendActiveMessage(SubagentActiveMessageRequest),
     Cancel(SubagentCancelRequest),
     ListActive(SubagentListActiveRequest),
     ListRunning(SubagentListRunningRequest),
@@ -1149,7 +1181,6 @@ mod tests {
 
     use super::SubagentCapabilityMode;
     use super::SubagentCapabilityModeExt;
-    use super::is_valid_resume_id;
 
     /// Create a `ToolConfig` with the given id and kind set.
     fn tc(id: &str, kind: ToolKind) -> ToolConfig {
@@ -1253,31 +1284,6 @@ mod tests {
             config.tools.is_empty(),
             "execute tools should still be filtered out"
         );
-    }
-
-    #[test]
-    fn is_valid_resume_id_rejects_sentinels() {
-        for bad in [
-            "",
-            "  ",
-            "null",
-            "Null",
-            "NULL",
-            "none",
-            "None",
-            "NONE",
-            "undefined",
-            "  null  ",
-        ] {
-            assert!(!is_valid_resume_id(bad), "{bad:?} should be invalid");
-        }
-    }
-
-    #[test]
-    fn is_valid_resume_id_accepts_real_ids() {
-        for good in ["019e0000-0000-7000-8000-0000000000bb", "abc-123", "prev-id"] {
-            assert!(is_valid_resume_id(good), "{good:?} should be valid");
-        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
-use super::reasoning_effort::EffortTarget;
+use crate::sampling::EffortTarget;
 use xai_grok_login::PreferredAuthMethod;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
@@ -419,7 +419,7 @@ impl MvpAgent {
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
-        self.memory_config = if config.enabled { Some(config) } else { None };
+        self.memory_config = Some(config);
     }
     /// Adopt the leader's [`AgentActivity`].
     /// The auto-update checker then sees the agent's live view of running turns/subagents and can flush sessions at shutdown.
@@ -1106,6 +1106,11 @@ impl MvpAgent {
         {
             return Err(err.into_acp_error());
         }
+        if let Some(handle) = self.resident_handle(session_id) {
+            handle
+                .emit_local_background_tasks
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         #[cfg(unix)] reap_guard.disarm();
         bind_guard.keep = true;
         Ok(serde_json::json!({
@@ -1448,29 +1453,27 @@ impl MvpAgent {
                 });
         }
     }
-    /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
+    /// Live `/v1/settings` read. Does not join the startup load and does not
+    /// accept a warm disk cache. `Rejected` is preserved for 401 self-heal.
     async fn fetch_settings(
         &self,
         auth: &xai_grok_login::GrokAuth,
     ) -> crate::remote::SettingsFetch {
-        let (base_url, alpha) = {
+        let (origin, alpha, auth_config) = {
             let cfg = self.cfg.borrow();
-            (cfg.endpoints.proxy_url(), cfg.endpoints.alpha_test_key.clone())
+            (
+                cfg.endpoints.proxy_url(),
+                cfg.endpoints.alpha_test_key.clone(),
+                cfg.grok_com_config.clone(),
+            )
         };
-        let auth = auth.clone();
-        match tokio::task::spawn_blocking(move || crate::remote::fetch_settings_blocking(
-                &base_url,
-                &auth,
-                alpha.as_deref(),
-            ))
-            .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::warn!(error = %e, "settings fetch task panicked");
-                crate::remote::SettingsFetch::Retry
-            }
-        }
+        let query = crate::agent::remote_config::settings_get::SettingsQuery::from_parts(
+            Some(auth.clone()),
+            origin,
+            alpha,
+            Some(auth_config),
+        );
+        crate::agent::remote_config::settings_get::fetch_settings_live(query).await
     }
     /// Fetch remote settings for `auth` and drive the external-OTEL gate from the outcome. Re-closes the gate first only on an account switch, then hands the outcome to [`OtelGate::resolve`].
     /// That returns the settings only on a successful fetch for the still-live identity. Both post-auth callers funnel through here. [`OtelGate::resolve`]: crate::agent::otel_gate::OtelGate::resolve
@@ -1485,8 +1488,8 @@ impl MvpAgent {
         };
         self.otel_gate.rearm_on_switch(&identity, channel);
         let outcome = self
-            .settings_manager
-            .fetch(auth, || self.fetch_settings_self_healing_401(auth))
+            .settings_refresh
+            .refresh(auth, || self.fetch_settings_self_healing_401(auth))
             .await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
         match outcome {
@@ -2183,11 +2186,14 @@ impl MvpAgent {
         cfg: &AgentConfig,
         auth_manager: Arc<AuthManager>,
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
+        boot: Option<crate::agent::init::BootstrapPrefetch>,
     ) -> Result<Self, crate::agent::init::BootstrapError> {
-        let (cfg, models_manager) = crate::agent::init::bootstrap(
+        let (cfg, models_manager) = crate::agent::init::bootstrap_with_cancel(
             cfg,
             &auth_manager,
             prefetched_models,
+            &tokio_util::sync::CancellationToken::new(),
+            boot,
         )?;
         Ok(Self::with_models(gateway, &cfg, auth_manager, models_manager))
     }
@@ -2228,7 +2234,7 @@ impl MvpAgent {
         gateway: GatewaySender,
         cfg: &AgentConfig,
         auth_manager: Arc<AuthManager>,
-        models_manager: crate::agent::models::ModelsManager,
+        models_manager: crate::agent::remote_config::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
         let sampling_config = models_manager.sampling_config();
@@ -2381,7 +2387,7 @@ impl MvpAgent {
             supervisor_started: std::cell::Cell::new(false),
             settings_reapply_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
             post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
-            settings_manager: super::settings_manager::SettingsManager::default(),
+            settings_refresh: crate::agent::remote_config::SettingsRefresh::default(),
             announcements_gen: std::cell::Cell::new(0),
             last_emitted_announcements: RefCell::new(Vec::new()),
             announcements_refresh_started: std::cell::Cell::new(false),
@@ -3286,7 +3292,8 @@ impl MvpAgent {
         }
     }
     /// Insert the per-session `_meta` keys shared by `new_session` and `load_session`.
-    /// The keys are `x.ai/sessionConfig` and `x.ai/sessionDetail`.
+    /// The keys are `x.ai/sessionConfig`, `x.ai/sessionDetail`,
+    /// and `x.ai/memoryMode`.
     /// Keeping both response paths on this one builder stops them drifting.
     pub(super) fn insert_session_config_meta(
         &self,
@@ -3308,6 +3315,15 @@ impl MvpAgent {
             serde_json::json!({ "options": config_options }),
         );
         meta.insert("x.ai/sessionDetail".to_string(), serde_json::json!(detail));
+        if let Some(memory_mode) = self
+            .resident_handle(session_id)
+            .and_then(|handle| handle.spawn_snapshot.memory_mode)
+        {
+            meta.insert(
+                MEMORY_MODE_META_KEY.to_string(),
+                serde_json::json!(memory_mode),
+            );
+        }
     }
     /// Seed the global sampling config with login auth when available. Only sets the `api_key` if missing. Does NOT resolve `base_url` from `current_model_id`. That is deferred to session creation time.
     /// It avoids cross-client contamination in leader mode, where `current_model_id` is shared mutable state.
@@ -3505,12 +3521,6 @@ impl MvpAgent {
         let turn = self.peek_turn_number(session_id);
         self.set_turn_number(session_id, turn.saturating_add(1));
         turn
-    }
-    pub(crate) fn allocate_subagent_turn_number(
-        &self,
-        session_id: &acp::SessionId,
-    ) -> u64 {
-        self.allocate_turn_number(session_id)
     }
     /// Read a session's next trace turn number without advancing the counter.
     fn peek_turn_number(&self, session_id: &acp::SessionId) -> u64 {
@@ -3727,6 +3737,10 @@ impl MvpAgent {
             session_info: session_info.clone(),
             turn_number,
             attempt_id: None,
+            memory_mode: session_handle
+                .spawn_snapshot
+                .memory_mode
+                .or_else(|| self.cfg.borrow().memory.mode),
             session_handle,
             session_registry_enabled,
             upload_queue,
@@ -3874,16 +3888,27 @@ impl MvpAgent {
         meta: Option<&acp::Meta>,
         init: &acp::InitializeRequest,
     ) -> bool {
-        meta.and_then(|m| m.get(xai_grok_status_line::CLIENT_STATUS_LINE_META))
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            xai_grok_status_line::CLIENT_STATUS_LINE_META,
+            xai_grok_status_line::STATUS_LINE_CAPABILITY,
+            false,
+        )
+    }
+    fn resolve_bool_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+        session_key: &str,
+        init_key: &str,
+        default: bool,
+    ) -> bool {
+        meta.and_then(|m| m.get(session_key))
             .or_else(|| {
-                init
-                    .client_capabilities
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get(xai_grok_status_line::STATUS_LINE_CAPABILITY))
+                init.client_capabilities.meta.as_ref().and_then(|m| m.get(init_key))
             })
             .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(default)
     }
     /// Switch the row on for the resident actor an attach reuses and ask it to fill it.
     /// The store precedes the request because the emitter re-reads the capability when the wake lands.
@@ -3901,6 +3926,35 @@ impl MvpAgent {
         if wanted {
             handle.request_status_snapshot();
         }
+    }
+    /// Whether the requesting client wants live `user_message_chunk` during a prompt.
+    /// Session `_meta` first: a leader multiplexes many clients behind one `initialize`.
+    pub(super) fn resolve_user_message_echo_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            crate::session::CLIENT_USER_MESSAGE_ECHO_META,
+            crate::session::USER_MESSAGE_ECHO_CAPABILITY,
+            false,
+        )
+    }
+    /// Assign live prompt echo for the reused resident actor. Can turn it off.
+    pub(super) fn attach_user_message_echo(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        handle
+            .set_user_message_echo_wanted(
+                Self::resolve_user_message_echo_capability(meta, init),
+            );
     }
     /// Extract per-client terminal/fs capabilities from request `_meta` (injected by the leader).
     /// Falls back to the shared `init` OnceCell.
@@ -3929,6 +3983,7 @@ impl MvpAgent {
         &self,
         init: &acp::InitializeRequest,
         spec: SessionSpawnOptions<'_>,
+        spawn_trace: Option<xai_grok_telemetry::startup::SpawnTraceContext>,
     ) -> Result<bool, acp::Error> {
         let SessionSpawnOptions {
             session_info,
@@ -3968,7 +4023,7 @@ impl MvpAgent {
         let mut prefetch = match prefetch {
             Some(prefetch) => prefetch,
             None => {
-                super::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
+                crate::session::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
                     cwd.as_path(),
                     folder_trust::TrustScan::skipped(),
                     self.plugin_registry_handle.clone(),
@@ -4627,10 +4682,9 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("x.ai/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
-            let status_line_enabled = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(
-                    Self::resolve_status_line_capability(session_meta, init),
-                ),
+            let client_caps = crate::session::notifications::SessionClientCaps::new(
+                Self::resolve_status_line_capability(session_meta, init),
+                Self::resolve_user_message_echo_capability(session_meta, init),
             );
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
@@ -4677,7 +4731,7 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
-                    status_line_enabled,
+                    client_caps,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,
@@ -4763,6 +4817,7 @@ impl MvpAgent {
                     is_chat_kind,
                     None,
                     None,
+                    spawn_trace,
                 )
                 .await?
         };

@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use xai_grok_tools::implementations::grok_build::workflow::WorkflowControl;
 use xai_workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
 
 #[derive(
@@ -49,6 +50,17 @@ impl WorkflowRunStatus {
     pub(crate) fn is_resumable(self) -> bool {
         // Cancelled (`/workflow stop`) keeps the journal; resume continues it the same way a pause does
         self.is_paused() || self == Self::Failed || self == Self::Cancelled
+    }
+
+    /// Whether `control` applies to a run in this status. A user pause only
+    /// interrupts a running engine; engine-paused runs already have nothing to
+    /// pause. A budget-limited run has likewise already stopped, and its status
+    /// is what enforces the raise-the-cap rule on resume, so stop leaves it alone.
+    pub(crate) fn accepts(self, control: WorkflowControl) -> bool {
+        match control {
+            WorkflowControl::Pause => self == Self::Active,
+            WorkflowControl::Stop => !self.is_completion_reportable(),
+        }
     }
 
     fn from_pause(kind: PauseKind) -> Self {
@@ -558,6 +570,14 @@ impl WorkflowTracker {
         self.runs.iter().map(|r| r.state.clone()).collect()
     }
 
+    /// Resolve a run id or session-unique display name to the run id.
+    pub(crate) fn find_run_id(&self, key: &str) -> Option<String> {
+        self.runs
+            .iter()
+            .find(|r| r.state.run_id == key || r.state.name == key)
+            .map(|r| r.state.run_id.clone())
+    }
+
     pub(crate) fn elapsed_ms(&self, run_id: &str) -> u64 {
         self.runs
             .iter()
@@ -621,6 +641,12 @@ impl WorkflowTracker {
             terminal_at_restore_run_ids,
             status_reported_revisions: std::collections::HashMap::new(),
         }
+    }
+
+    /// Skip the completion wake and reminder for a run whose outcome the model
+    /// already received directly (it stopped the run itself).
+    pub(crate) fn mark_completion_reported(&mut self, run_id: &str) {
+        self.reported_terminal_run_ids.insert(run_id.to_owned());
     }
 
     pub(crate) fn is_unreported_completion(&self, run_id: &str, revision: u64) -> bool {

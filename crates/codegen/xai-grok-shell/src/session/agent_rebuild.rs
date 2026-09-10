@@ -70,13 +70,14 @@ pub(crate) struct AgentRebuildSpec {
     pub tools_notification_handle: ToolNotificationHandle,
     pub bridge_state_path: PathBuf,
     pub session_env: Arc<HashMap<String, String>>,
-    pub models_manager: crate::agent::models::ModelsManager,
+    pub models_manager: crate::agent::remote_config::ModelsManager,
     pub compaction_policy: CompactionPolicy,
     pub reminder_policy: ReminderPolicy,
     pub memory_enabled: bool,
     pub memory_global_path: Option<String>,
     pub memory_workspace_path: Option<String>,
     pub memory_backend: Option<Arc<dyn MemoryBackend>>,
+    pub memory_v2_access: Option<xai_grok_tools::types::memory_v2::MemoryV2AccessResource>,
     pub web_search_config: WebSearchConfig,
     /// `[toolset.web_search]` domain policy, resolved once at spawn.
     /// It is applied to both search paths (the hosted `tool_overrides` merge and the client-side `WebSearchConfig`) so they never diverge.
@@ -174,6 +175,7 @@ impl AgentRebuildSpec {
             memory_global_path,
             memory_workspace_path,
             memory_backend,
+            memory_v2_access,
             web_search_config,
             web_search_domains,
             backend_search,
@@ -244,6 +246,7 @@ impl AgentRebuildSpec {
         .with_reminder_policy(reminder_policy.clone())
         .with_memory_enabled(*memory_enabled)
         .with_memory_paths(memory_global_path.clone(), memory_workspace_path.clone())
+        .with_memory_v2_access(memory_v2_access.clone())
         .with_is_non_interactive(*is_non_interactive)
         .with_system_prompt_label(system_prompt_label.clone())
         .with_session_env(session_env.clone())
@@ -410,13 +413,14 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         tools_notification_handle: ToolNotificationHandle::noop(),
         bridge_state_path: std::env::temp_dir().join("test_tool_state.json"),
         session_env: Arc::new(HashMap::new()),
-        models_manager: crate::agent::models::ModelsManager::default(),
+        models_manager: crate::agent::remote_config::ModelsManager::default(),
         compaction_policy: CompactionPolicy::default(),
         reminder_policy: ReminderPolicy::default(),
         memory_enabled: false,
         memory_global_path: None,
         memory_workspace_path: None,
         memory_backend: None,
+        memory_v2_access: None,
         web_search_config: WebSearchConfig::default(),
         web_search_domains: None,
         backend_search: false,

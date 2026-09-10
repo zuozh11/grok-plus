@@ -27,6 +27,7 @@ fn startup_settings_deadline_selects_by_profile() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn post_gate_pass_spends_at_most_one_settings_budget() {
+    crate::agent::remote_config::settings_get::reset_startup_settings_for_tests();
     let runs_before = PREFETCH_RUNS.with(std::cell::Cell::get);
 
     let mut cfg = AgentConfig::default();
@@ -38,6 +39,9 @@ fn post_gate_pass_spends_at_most_one_settings_budget() {
         &mut cfg,
         StartupPrefetch::ClientSupplied,
         LaunchProfile::Personal,
+        &CancellationToken::new(),
+        None,
+        None,
     );
     assert_eq!(
         PREFETCH_RUNS.with(std::cell::Cell::get),
@@ -46,7 +50,14 @@ fn post_gate_pass_spends_at_most_one_settings_budget() {
     );
 
     let mut cfg = AgentConfig::default();
-    apply_post_gate_settings(&mut cfg, StartupPrefetch::Ran, LaunchProfile::Personal);
+    apply_post_gate_settings(
+        &mut cfg,
+        StartupPrefetch::Ran,
+        LaunchProfile::Personal,
+        &CancellationToken::new(),
+        None,
+        None,
+    );
     assert_eq!(
         PREFETCH_RUNS.with(std::cell::Cell::get),
         runs_before + 1,
@@ -56,16 +67,28 @@ fn post_gate_pass_spends_at_most_one_settings_budget() {
 
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
-fn supplied_settings_consume_the_pending_fetch() {
-    crate::agent::models::startup_prefetch::inject_for_tests(None);
+fn supplied_settings_skip_the_getter() {
+    crate::agent::remote_config::settings_get::reset_startup_settings_for_tests();
+    let runs_before = PREFETCH_RUNS.with(std::cell::Cell::get);
     let mut cfg = AgentConfig {
         remote_settings: Some(Default::default()),
         ..AgentConfig::default()
     };
-    let _ = super::ensure_remote_settings_side_effects(&mut cfg, LaunchProfile::Personal);
+    let outcome = super::ensure_remote_settings_side_effects(
+        &mut cfg,
+        LaunchProfile::Personal,
+        &CancellationToken::new(),
+        None,
+        None,
+    );
     assert!(
-        !crate::agent::models::startup_prefetch::inflight_for_tests(),
-        "a supplied-settings pass must consume the pending fetch, not strand it"
+        matches!(outcome, Ok(StartupPrefetch::ClientSupplied)),
+        "supplied settings must not run the getter, got {outcome:?}"
+    );
+    assert_eq!(
+        PREFETCH_RUNS.with(std::cell::Cell::get),
+        runs_before,
+        "supplied settings must not spend a settings budget"
     );
 }
 
@@ -75,7 +98,7 @@ fn cancelled_bootstrap_returns_before_side_effects() {
     let auth = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let err = match bootstrap_with_cancel(&AgentConfig::default(), &auth, None, &cancel) {
+    let err = match bootstrap_with_cancel(&AgentConfig::default(), &auth, None, &cancel, None) {
         Err(err) => err,
         Ok(_) => panic!("a pre-cancelled token must not run bootstrap"),
     };
@@ -93,7 +116,7 @@ fn second_bootstrap_bails_when_cancelled_while_the_gate_is_held() {
         let dir = tempfile::tempdir().expect("tempdir");
         let auth = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
         entered_worker.store(true, Ordering::SeqCst);
-        bootstrap_with_cancel(&AgentConfig::default(), &auth, None, &worker_cancel)
+        bootstrap_with_cancel(&AgentConfig::default(), &auth, None, &worker_cancel, None)
     });
     let started = std::time::Instant::now();
     while !entered.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(2) {

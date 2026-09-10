@@ -64,13 +64,7 @@ async fn failed_server_announced_once_per_episode() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("dead"));
-                let generation = state.generation();
-                state.record_init_failure(
-                    generation,
-                    "dead",
-                    false,
-                    Some("boom\n- forged".to_string()),
-                );
+                state.record_init_failure("dead", false, Some("boom\n- forged".to_string()));
             }
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
@@ -87,8 +81,7 @@ async fn failed_server_announced_once_per_episode() {
             assert_eq!(failed_reminders(&actor).await.len(), 1);
             {
                 let mut state = actor.mcp_state.lock().await;
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("timed out".to_string()));
+                state.record_init_failure("dead", false, Some("timed out".to_string()));
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
@@ -136,13 +129,7 @@ async fn tools_listed_server_with_failure_record_is_announced() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("half"));
-                let generation = state.generation();
-                state.record_init_failure(
-                    generation,
-                    "half",
-                    false,
-                    Some("tools/list failed".to_string()),
-                );
+                state.record_init_failure("half", false, Some("tools/list failed".to_string()));
             }
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
@@ -166,15 +153,13 @@ async fn auth_escalation_reannounces_once() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("dead"));
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("boom".to_string()));
+                state.record_init_failure("dead", false, Some("boom".to_string()));
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
             {
                 let mut state = actor.mcp_state.lock().await;
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", true, None);
+                state.record_init_failure("dead", true, None);
             }
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
@@ -187,32 +172,27 @@ async fn auth_escalation_reannounces_once() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.auth_required.remove("dead");
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("boom".to_string()));
+                state.record_init_failure("dead", false, Some("boom".to_string()));
             }
             refresh_and_inject(&actor).await;
             {
                 let mut state = actor.mcp_state.lock().await;
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", true, None);
+                state.record_init_failure("dead", true, None);
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 2);
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("oauth"));
-                let generation = state.generation();
-                state.record_init_failure(generation, "oauth", true, None);
+                state.record_init_failure("oauth", true, None);
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 3);
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.auth_required.remove("oauth");
-                let generation = state.generation();
-                state.record_init_failure(generation, "oauth", false, Some("boom".to_string()));
-                let generation = state.generation();
-                state.record_init_failure(generation, "oauth", true, None);
+                state.record_init_failure("oauth", false, Some("boom".to_string()));
+                state.record_init_failure("oauth", true, None);
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 3);
@@ -230,8 +210,8 @@ fn classify_defers_placeholder_reason_until_init_completes() {
     assert!(failed.is_empty(), "{failed:?}");
     assert!(unconnected.contains("s"), "episodes must stay alive");
     let _owner = state.try_start_init().expect("fixture claims init");
-    let generation = state.generation();
-    state.finish_init(generation);
+    state.finish_init();
+    state.complete_init();
     let (failed, _) = classify_failed_servers(&state, &connected);
     assert_eq!(failed.len(), 1);
     assert!(failed[0].detail.is_none(), "{:?}", failed[0]);
@@ -245,10 +225,8 @@ fn classify_collects_facts_and_sorts() {
         http_server("b-auth"),
         http_server("a-dead"),
     ]);
-    let generation = state.generation();
-    state.record_init_failure(generation, "b-auth", true, None);
-    let generation = state.generation();
-    state.record_init_failure(generation, "a-dead", false, Some("boom".to_string()));
+    state.record_init_failure("b-auth", true, None);
+    state.record_init_failure("a-dead", false, Some("boom".to_string()));
     let (failed, _) = classify_failed_servers(&state, &connected);
     assert_eq!(failed.len(), 2, "{failed:?}");
     assert_eq!(failed[0].name, "a-dead");
@@ -318,16 +296,14 @@ async fn handshaking_and_init_windows_defer_announcements() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("dead"));
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("boom".to_string()));
+                state.record_init_failure("dead", false, Some("boom".to_string()));
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
             {
                 let mut state = actor.mcp_state.lock().await;
                 std::mem::forget(state.try_start_init().expect("fixture must enter Starting"));
-                let generation = state.generation();
-                state.mark_servers_initializing(generation, ["dead".to_string()]);
+                state.mark_servers_initializing(["dead".to_string()]);
                 assert!(
                     state.is_server_handshaking("dead"),
                     "handshake must be recorded"
@@ -338,12 +314,9 @@ async fn handshaking_and_init_windows_defer_announcements() {
             assert_eq!(failed_reminders(&actor).await.len(), 1);
             {
                 let mut state = actor.mcp_state.lock().await;
-                let generation = state.generation();
-                state.mark_server_ready(generation, "dead");
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("timed out".to_string()));
-                let generation = state.generation();
-                state.record_init_failure(generation, "fresh", false, Some("refused".to_string()));
+                state.mark_server_ready("dead");
+                state.record_init_failure("dead", false, Some("timed out".to_string()));
+                state.record_init_failure("fresh", false, Some("refused".to_string()));
             }
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
@@ -383,8 +356,7 @@ async fn rewind_rearms_failed_server_announcements() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("dead"));
-                let generation = state.generation();
-                state.record_init_failure(generation, "dead", false, Some("boom".to_string()));
+                state.record_init_failure("dead", false, Some("boom".to_string()));
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
@@ -433,8 +405,7 @@ async fn episode_ends_on_recovery_or_removal_then_reannounces() {
             {
                 let mut state = actor.mcp_state.lock().await;
                 state.configs.push(http_server("flaky"));
-                let generation = state.generation();
-                state.record_init_failure(generation, "flaky", false, Some("boom".to_string()));
+                state.record_init_failure("flaky", false, Some("boom".to_string()));
             }
             refresh_and_inject(&actor).await;
             assert_eq!(failed_reminders(&actor).await.len(), 1);
@@ -444,13 +415,7 @@ async fn episode_ends_on_recovery_or_removal_then_reannounces() {
             disconnect_server(&actor).await;
             {
                 let mut state = actor.mcp_state.lock().await;
-                let generation = state.generation();
-                state.record_init_failure(
-                    generation,
-                    "flaky",
-                    false,
-                    Some("down again".to_string()),
-                );
+                state.record_init_failure("flaky", false, Some("down again".to_string()));
             }
             refresh_and_inject(&actor).await;
             let reminders = failed_reminders(&actor).await;
@@ -467,8 +432,7 @@ async fn episode_ends_on_recovery_or_removal_then_reannounces() {
                 {
                     let mut state = actor.mcp_state.lock().await;
                     state.configs.push(http_server("gone"));
-                    let generation = state.generation();
-                    state.record_init_failure(generation, "gone", false, Some("boom".to_string()));
+                    state.record_init_failure("gone", false, Some("boom".to_string()));
                 }
                 refresh_and_inject(&actor).await;
                 assert_eq!(failed_reminders(&actor).await.len(), 1);
@@ -478,8 +442,7 @@ async fn episode_ends_on_recovery_or_removal_then_reannounces() {
                 {
                     let mut state = actor.mcp_state.lock().await;
                     state.configs.push(http_server("gone"));
-                    let generation = state.generation();
-                    state.record_init_failure(generation, "gone", false, Some("boom".to_string()));
+                    state.record_init_failure("gone", false, Some("boom".to_string()));
                 }
                 refresh_and_inject(&actor).await;
                 assert_eq!(failed_reminders(&actor).await.len(), 2);
@@ -494,6 +457,7 @@ async fn refresh_for(a: &SessionActor, bridge: &Arc<crate::tools::bridge::ToolBr
         Arc::clone(&a.mcp_state),
         a.managed_mcp_handle.clone(),
         a.tool_metadata_snapshot.clone(),
+        std::collections::HashMap::new(),
     )
     .await;
 }
@@ -617,23 +581,35 @@ async fn refresh_and_handover_reflect_only_the_live_state() {
 async fn refresh_body() {
     let a = plain_actor().await;
     let bridge = a.agent.borrow().tool_bridge().clone();
-    for name in ["srv__a", "srv__b", "gone__probe"] {
+    for name in ["srv__a", "gone__probe"] {
         register_stub(&bridge, name).await;
     }
-    a.mcp_state.lock().await.owned_clients.insert(
-        "srv".to_string(),
-        std::sync::Arc::new(crate::session::mcp_servers::McpClient::stub("srv")),
+    a.refresh_mcp_snapshot_and_schedule_reminder().await;
+    assert!(
+        a.tool_metadata_snapshot
+            .lock()
+            .unwrap()
+            .tools
+            .iter()
+            .any(|t| t.server_name == "gone")
     );
-    bridge.unregister_tools_by_prefix("srv__");
-    register_stub(&bridge, "srv__a").await;
-    {
-        let st = a.mcp_state.lock().await;
-        super::mcp::unregister_dropped_server_tools(
-            &bridge,
-            &st,
-            &["srv".to_string(), "gone".to_string()],
-        );
-    }
+    a.apply_mcp_config_diff(
+        &crate::session::mcp_servers::McpConfigDiff {
+            added: vec![],
+            removed: vec!["gone".to_owned()],
+            retained: vec![],
+        },
+        None,
+    );
+    assert!(
+        !a.tool_metadata_snapshot
+            .lock()
+            .unwrap()
+            .tools
+            .iter()
+            .any(|t| t.server_name == "gone"),
+        "a config change takes the server out of the snapshot the model searches before it yields"
+    );
     let names: Vec<String> = bridge
         .tool_definitions()
         .await
@@ -642,15 +618,11 @@ async fn refresh_body() {
         .collect();
     assert!(
         names.iter().any(|n| n == "srv__a"),
-        "the live tool survives the handover"
-    );
-    assert!(
-        !names.iter().any(|n| n == "srv__b"),
-        "a dropped tool does not survive"
+        "another server's tool survives"
     );
     assert!(
         !names.iter().any(|n| n == "gone__probe"),
-        "a dropped server's tools do not"
+        "the removed server's tools leave the bridge"
     );
     let a = plain_actor().await;
     let bridge = a.agent.borrow().tool_bridge().clone();
@@ -662,6 +634,7 @@ async fn refresh_body() {
         Arc::clone(&a.mcp_state),
         a.managed_mcp_handle.clone(),
         a.tool_metadata_snapshot.clone(),
+        std::collections::HashMap::new(),
     ));
     for _ in 0..8 {
         tokio::task::yield_now().await;
@@ -694,18 +667,81 @@ async fn refresh_body() {
     let bridge = a.agent.borrow().tool_bridge().clone();
     refresh_for(&a, &bridge).await;
     assert!(
-        !a.tool_metadata_snapshot.lock().unwrap().mcp_initialized,
-        "a refresh during init must report initializing"
-    );
-    {
-        let mut st = a.mcp_state.lock().await;
-        let generation = st.generation();
-        st.mark_all_servers_ready(generation);
-        st.finish_init(generation);
-    }
-    refresh_for(&a, &bridge).await;
-    assert!(
         a.tool_metadata_snapshot.lock().unwrap().mcp_initialized,
-        "a refresh after init must report ready"
+        "the completion flag belongs to the init lifecycle; a refresh never rewrites it"
     );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn completion_re_arms_the_reminder() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let a = actor_with_mcp(vec![stdio("s", "true")], false, vec![]).await;
+            a.mcp_reminder_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+            {
+                let mut st = a.mcp_state.lock().await;
+                st.finish_init();
+                a.init_publication().complete(&mut st);
+            }
+            assert!(
+                a.mcp_reminder_dirty
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                "a reminder consumed between the final refresh and completion re-checks the complete state"
+            );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread")]
+async fn superseded_refresh_does_not_publish() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let a = plain_actor().await;
+            let live = a.agent.borrow().tool_bridge().clone();
+            register_stub(&live, "live__tool").await;
+            refresh_for(&a, &live).await;
+            let stale = a.mcp_state.lock().await.current_generation();
+            drop(a.mcp_state.lock().await.restart_init());
+            SnapshotRefresher {
+                generation: Some(stale),
+                tool_bridge: Arc::new(crate::tools::bridge::ToolBridge::for_test()),
+                mcp_state: Arc::clone(&a.mcp_state),
+                refresh_gate: Arc::clone(&a.mcp_refresh_gate),
+                managed_mcp_handle: a.managed_mcp_handle.clone(),
+                tool_metadata_snapshot: a.tool_metadata_snapshot.clone(),
+                mcp_reminder_dirty: Arc::clone(&a.mcp_reminder_dirty),
+                disabled_gateway_tools: std::collections::HashMap::new(),
+                mcps_root: None,
+            }
+            .refresh()
+            .await;
+            let tools: Vec<String> = a
+                .tool_metadata_snapshot
+                .lock()
+                .unwrap()
+                .tools
+                .iter()
+                .map(|t| t.qualified_name.clone())
+                .collect();
+            assert!(
+                tools.iter().any(|t| t == "live__tool"),
+                "a superseded pass must not overwrite the live snapshot, got {tools:?}"
+            );
+        })
+        .await;
+}
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn client_that_fails_relist_on_the_rebuilt_bridge_is_evicted() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let a = plain_actor().await;
+            a.mcp_state.lock().await.owned_clients.insert(
+                "mute".to_string(),
+                Arc::new(crate::session::mcp_servers::McpClient::stub("mute")),
+            );
+            a.re_register_mcp_tools_on_rebuilt_bridge().await;
+            assert!(
+                a.mcp_state.lock().await.owned_clients.get("mute").is_none(),
+                "a kept client would look connected to the next pass and never be retried"
+            );
+        })
+        .await;
 }

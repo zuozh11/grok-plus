@@ -24,6 +24,67 @@ fn esc() -> crossterm::event::Event {
 }
 
 #[test]
+fn remember_save_carries_the_session_pinned_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::WithPinnedMemoryMode {
+            agent_id: id,
+            memory_mode: Some(xai_grok_shell::config::MemoryMode::V2),
+            result: Box::new(TaskResult::SessionCreated {
+                agent_id: id,
+                session_id: acp::SessionId::new("pinned-v2"),
+                models: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    let rewrite = dispatch(
+        Action::SendRememberNote("keep this in v2".to_owned()),
+        &mut app,
+    );
+    assert!(matches!(
+        rewrite.as_slice(),
+        [Effect::RewriteMemoryNote { .. }]
+    ));
+
+    // A later disk-config flip cannot affect the effect: it owns the mode
+    // returned by the active session when it was created.
+    let save = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+    assert!(matches!(
+        save.as_slice(),
+        [Effect::SaveMemoryNote {
+            pinned_mode: Some(xai_grok_shell::config::MemoryMode::V2),
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn remember_save_without_session_defers_to_disk_mode() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+
+    assert!(
+        dispatch(
+            Action::SendRememberNote("pre-session note".to_owned()),
+            &mut app,
+        )
+        .is_empty()
+    );
+    let save = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+    assert!(matches!(
+        save.as_slice(),
+        [Effect::SaveMemoryNote {
+            pinned_mode: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
 fn recap_unavailable_toast_empty_vs_with_messages() {
     assert_eq!(recap_unavailable_toast(false), "No messages yet");
     assert_eq!(recap_unavailable_toast(true), "Couldn't generate recap");

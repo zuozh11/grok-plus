@@ -598,6 +598,7 @@ fn inject_session_request_context(
         && !capabilities.fs_read
         && !capabilities.fs_write
         && !capabilities.status_line
+        && !capabilities.user_message_echo
     {
         return false;
     }
@@ -670,6 +671,12 @@ fn inject_session_request_context(
                 xai_grok_status_line::CLIENT_STATUS_LINE_META.to_string(),
                 serde_json::json!(capabilities.status_line),
             );
+            if capabilities.user_message_echo {
+                meta_obj.insert(
+                    crate::session::CLIENT_USER_MESSAGE_ECHO_META.to_string(),
+                    serde_json::json!(true),
+                );
+            }
         }
     }
     mutated

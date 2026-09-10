@@ -6,11 +6,26 @@ pub use xai_grok_config_types::{
     DEFAULT_RECENCY_DECAY, MemoryConfig, MemoryDreamConfig, MemoryDreamSettings,
     MemoryEmbeddingConfig, MemoryEmbeddingSettings, MemoryFlushConfig, MemoryFlushSettings,
     MemoryGcConfig, MemoryGcSettings, MemoryIndexConfig, MemoryIndexSettings,
-    MemoryInitialInjectionConfig, MemoryInitialInjectionSettings, MemorySearchConfig,
+    MemoryInitialInjectionConfig, MemoryInitialInjectionSettings, MemoryMode, MemorySearchConfig,
     MemorySearchSettings, MemorySessionConfig, MemorySessionSettings, MemorySettings,
     MemoryWatcherConfig, MemoryWatcherSettings, MmrConfig, MmrSettings, PruningConfig,
     PruningSettings, TemporalDecayConfig, TemporalDecaySettings,
 };
+/// Read the memory mode selected by the current effective config.
+///
+/// Session actors use their already-resolved [`MemoryConfig`] instead. This
+/// helper is for standalone commands that do not own a session.
+pub fn load_memory_mode() -> std::io::Result<MemoryMode> {
+    let config = load_effective_config()?;
+    let settings: MemorySettings = config
+        .get("memory")
+        .cloned()
+        .map(MemorySettings::deserialize)
+        .transpose()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        .unwrap_or_default();
+    Ok(settings.mode.unwrap_or_default())
+}
 /// Configuration for subagent (task tool) support.
 /// Parsed from the `[subagents]` section of `~/.grok/config.toml` or `.grok/config.toml`.
 /// Enabled by default; can be disabled via the `GROK_SUBAGENTS=0` env var or `[subagents] enabled = false` in config.toml.

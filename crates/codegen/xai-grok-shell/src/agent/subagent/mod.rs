@@ -12,7 +12,7 @@
 //!   so that edits, bash commands, and file reads go through the same backends.
 #![deny(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 use crate::agent::config::{resolve_credentials, sampling_config_for_model};
-use crate::agent::models::resolve_catalog_key;
+use crate::agent::remote_config::resolve_catalog_key;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::{
     self, SessionCommand, SessionHandle, commands::PromptTurnResult as SubagentPromptTurnResult,
@@ -45,8 +45,11 @@ mod attempt_runner;
 mod spawn;
 mod start_artifact_publication;
 pub(crate) use spawn::{
-    ChildRunOutput, StartedChild, emit_subagent_notification, spawn_subagent_coordinator,
-    subagent_coordinator_channel, worker_runtime,
+    emit_subagent_notification, spawn_subagent_coordinator, subagent_coordinator_channel,
+    worker_runtime,
+};
+pub(crate) use xai_grok_tools::implementations::grok_build::task::coordinator::{
+    ChildRunOutput, StartedChild,
 };
 mod attempt_store;
 mod child_runtime;
@@ -242,6 +245,8 @@ pub(crate) struct SubagentSpawnContext {
     pub session_env: Arc<HashMap<String, String>>,
     /// Parent's memory config, shared so the child can access the same cross-session memory store.
     pub memory_config: Option<crate::config::MemoryConfig>,
+    /// Parent's selected memory implementation, retained even when memory is disabled.
+    pub memory_mode: crate::config::MemoryMode,
     pub web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     pub web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     pub image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
@@ -291,8 +296,9 @@ pub(crate) struct SubagentSpawnContext {
     /// Whether the runtime turn-end TodoGate is force-enabled via `--todo-gate`.
     /// Inherited from the parent session.
     pub todo_gate: bool,
-    /// Remote settings snapshot from the parent session.
-    /// Used to resolve `ReminderPolicy.todo_gate` (CLI > remote > default) for the subagent.
+    /// Remote settings snapshot from the parent session, the remote tier for every
+    /// `resolve_*` on this context. `run_shell_child` reads it again after the child
+    /// spawn, so the child gets a clone, not a move.
     pub remote_settings: Option<crate::util::config::RemoteSettings>,
     /// Inherited `--laziness-debug-log <path>` from the parent session.
     /// Subagent classifier fires append to the same log file.
@@ -311,7 +317,7 @@ pub(crate) struct SubagentSpawnContext {
     /// Plugin registry for plugin-aware agent lookup.
     pub plugin_registry: Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>>,
     /// Shared models manager for etag-triggered refresh.
-    pub models_manager: crate::agent::models::ModelsManager,
+    pub models_manager: crate::agent::remote_config::ModelsManager,
     /// Pre-resolved file tool overrides (hashline vs standard) from the parent.
     /// `None` means use the standard (default) file tools.
     pub file_tool_overrides: Option<Vec<xai_grok_tools::registry::types::ToolConfig>>,
@@ -533,13 +539,17 @@ pub(crate) struct ShellCompletionData {
     synthetic_trace_tx:
         Option<mpsc::UnboundedSender<crate::upload::turn::SyntheticTurnTraceRequest>>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
-    attempt_id: Option<String>,
+    attempt_id: Option<xai_message_delivery_core::AttemptId>,
     turn_number: Option<u64>,
     state: Arc<parking_lot::Mutex<ShellCompletionState>>,
 }
 impl ShellCompletionData {
-    fn from_context(ctx: &SubagentSpawnContext) -> Self {
-        Self {
+    fn from_context(
+        ctx: &SubagentSpawnContext,
+        attempt_id: xai_message_delivery_core::AttemptId,
+        turn_number: Option<u64>,
+    ) -> Self {
+        ShellCompletionData {
             auto_wake_enabled: ctx.auto_wake_enabled,
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
             task_output_tool_name: ctx.task_output_tool_name.clone(),
@@ -547,8 +557,8 @@ impl ShellCompletionData {
             scheduler_create_tool_name: ctx.scheduler_create_tool_name.clone(),
             synthetic_trace_tx: ctx.synthetic_trace_tx.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
-            attempt_id: None,
-            turn_number: None,
+            attempt_id: Some(attempt_id),
+            turn_number,
             state: Default::default(),
         }
     }
@@ -1675,6 +1685,9 @@ pub(crate) fn describe_subagent_type(
         SubagentValidateTypeOutcome::ValidationUnavailable => {
             return SubagentDescribeOutcome::Unavailable;
         }
+        SubagentValidateTypeOutcome::CoordinatorGone => {
+            return SubagentDescribeOutcome::Unavailable;
+        }
         SubagentValidateTypeOutcome::Ok => {}
         _ => return SubagentDescribeOutcome::Unavailable,
     }
@@ -1814,23 +1827,10 @@ fn telemetry_owner_kind(
     }
 }
 fn failure_result(request: &SubagentRequest, error: &str) -> SubagentResult {
-    SubagentResult {
-        success: false,
-        error: Some(error.to_string()),
-        subagent_id: request.id.clone(),
-        child_session_id: request.id.clone(),
-        ..Default::default()
-    }
+    SubagentResult::failed(request.id.clone(), request.id.clone(), error)
 }
 fn cancelled_result(request: &SubagentRequest, error: &str) -> SubagentResult {
-    SubagentResult {
-        success: false,
-        cancelled: true,
-        error: Some(error.to_string()),
-        subagent_id: request.id.clone(),
-        child_session_id: request.id.clone(),
-        ..Default::default()
-    }
+    SubagentResult::cancelled(request.id.clone(), request.id.clone(), error)
 }
 fn child_run_output(
     result: SubagentResult,
@@ -1875,12 +1875,8 @@ fn fail_subagent(
     gcs_ctx: &GcsUploadContext,
 ) -> SubagentResult {
     let result = SubagentResult {
-        success: false,
-        error: Some(error.to_string()),
-        subagent_id: subagent_id.to_string(),
-        child_session_id: child_session_id.0.to_string(),
         duration_ms,
-        ..Default::default()
+        ..SubagentResult::failed(subagent_id, &*child_session_id.0, error)
     };
     persist_subagent_completion(subagent_meta_dir, &result, gcs_ctx);
     result
@@ -1895,24 +1891,16 @@ impl UnpromotedChildDisposition {
     fn result(self, subagent_id: &str, child_session_id: &str, duration_ms: u64) -> SubagentResult {
         match self {
             Self::Cancelled => SubagentResult {
-                success: false,
-                cancelled: true,
-                error: Some("Subagent was cancelled".to_string()),
-                subagent_id: subagent_id.to_string(),
-                child_session_id: child_session_id.to_string(),
                 duration_ms,
-                ..Default::default()
+                ..SubagentResult::cancelled(subagent_id, child_session_id, "Subagent was cancelled")
             },
             Self::AdmissionTimedOut => SubagentResult {
-                success: false,
-                cancelled: false,
-                error: Some(
-                    "Subagent initial prompt was not admitted before the deadline".to_string(),
-                ),
-                subagent_id: subagent_id.to_string(),
-                child_session_id: child_session_id.to_string(),
                 duration_ms,
-                ..Default::default()
+                ..SubagentResult::failed(
+                    subagent_id,
+                    child_session_id,
+                    "Subagent initial prompt was not admitted before the deadline",
+                )
             },
         }
     }

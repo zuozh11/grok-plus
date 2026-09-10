@@ -388,7 +388,7 @@ pub(crate) struct CommandAvailability {
     /// Memory backend is enabled AND the active toolset includes `memory_search`/`memory_get`.
     /// `/flush` and `/dream` only make sense when the model can later read back what they wrote.
     pub memory: bool,
-    /// Memory backend is configured (has `backend_params`) but not necessarily currently enabled.
+    /// A legacy backend or v2 storage layout is configured, but not necessarily currently enabled.
     /// Gates `/memory` (browse and toggle) so the user can re-enable memory after toggling it off.
     pub memory_configured: bool,
     pub scheduler: bool,

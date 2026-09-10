@@ -3,17 +3,19 @@
 //!
 //! [session setup]: https://agentclientprotocol.com/protocol/v1/session-setup
 use super::reasoning_effort::{
-    EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
+    NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
 };
 use super::sampler_prewarm::spawn_sampler_transport_prewarm;
 use super::*;
 use crate::agent::session_metrics::SessionStartKind;
+use crate::sampling::EffortTarget;
 /// Refusals resume must give verbatim, so a test cannot mistake some other `invalid_params` for the guard it is pinning.
 pub(super) const RESUME_REFUSES_CHAT: &str =
     "session/resume is not supported for chat sessions; use session/load";
 pub(super) const RESUME_REFUSES_EXTRA_DIRS: &str =
     "session/resume does not support additionalDirectories";
 const TOOL_OVERRIDES_ECHO_BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+const BACKGROUND_TASKS_SNAPSHOT_ACK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 async fn read_applied_tool_overrides(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<SessionCommand>,
 ) -> Option<xai_grok_sampling_types::ToolOverrides> {
@@ -331,7 +333,7 @@ impl MvpAgent {
             .and_then(|m| m.get("yoloMode"))
             .and_then(|v| v.as_bool())
             .unwrap_or(self.default_yolo_mode);
-        let session_auto_mode = resolve_session_auto_mode(
+        let session_auto_mode = crate::session::auto_mode::resolve_session_auto_mode(
             arguments.meta.as_ref(),
             self.default_auto_mode,
             session_yolo_mode,
@@ -349,12 +351,13 @@ impl MvpAgent {
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
         reject_direct_hub_cloud_meta(arguments.meta.as_ref())?;
-        let mut prefetch = super::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
-            cwd.as_path(),
-            trust_scan,
-            self.plugin_registry_handle.clone(),
-            arguments.meta.as_ref(),
-        );
+        let mut prefetch =
+            crate::session::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
+                cwd.as_path(),
+                trust_scan,
+                self.plugin_registry_handle.clone(),
+                arguments.meta.as_ref(),
+            );
         prefetch.resolve_trust(cwd.as_path(), remote_settings.as_ref());
         #[cfg(all(feature = "local-workspace", unix))]
         let mut local_ws_reap_guard =
@@ -572,7 +575,12 @@ impl MvpAgent {
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             spawn_timer.with_subphase(xai_grok_telemetry::startup::Subphase::SessionSpawn);
-            self.spawn_and_register_session(init, spawn_opts).await
+            let spawn_trace = xai_grok_telemetry::startup::SpawnTraceContext::new(
+                spawn_timer.subphase_span(),
+                tracing::Span::current(),
+            );
+            self.spawn_and_register_session(init, spawn_opts, Some(spawn_trace))
+                .await
         };
         #[cfg(all(feature = "local-workspace", unix))]
         if spawn_res.is_err() {
@@ -580,6 +588,15 @@ impl MvpAgent {
         }
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
+        if session_computer_sessions
+            .as_ref()
+            .is_some_and(|sessions| !sessions.is_empty())
+            && let Some(handle) = self.resident_handle(&session_id)
+        {
+            handle
+                .emit_local_background_tasks
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         #[cfg(feature = "local-workspace")]
         if local_workspace_intent_present(arguments.meta.as_ref()) {
             self.mark_local_workspace_bound(session_id.clone());
@@ -654,7 +671,7 @@ impl MvpAgent {
             let current = self.models_manager.current_model_id();
             let reason = format!(
                 "\"{requested}\": {}. This session is using \"{}\".",
-                crate::agent::models::allowlist_denied_message(&self.cfg.borrow()),
+                crate::agent::remote_config::allowlist_denied_message(&self.cfg.borrow()),
                 current.0
             );
             self.send_model_auto_switched(
@@ -747,6 +764,7 @@ impl MvpAgent {
             insert_applied_tool_overrides(obj, applied_tool_overrides.as_ref());
         }
         self.attach_status_line(&session_id, arguments.meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, arguments.meta.as_ref(), init);
         #[cfg(all(feature = "local-workspace", unix))]
         local_ws_reap_guard.disarm();
         log_session_started(
@@ -929,7 +947,7 @@ impl MvpAgent {
             .and_then(|m| m.get("yoloMode"))
             .and_then(|v| v.as_bool())
             .unwrap_or(self.default_yolo_mode);
-        let session_auto_mode = resolve_session_auto_mode(
+        let session_auto_mode = crate::session::auto_mode::resolve_session_auto_mode(
             request_meta.as_ref(),
             self.default_auto_mode,
             session_yolo_mode,
@@ -964,6 +982,14 @@ impl MvpAgent {
                 folder_trust::project_scope_allowed(cwd.as_path()),
             ))
         };
+        let gateway_backed = session_computer_sessions
+            .as_ref()
+            .is_some_and(|sessions| !sessions.is_empty());
+        if gateway_backed && let Some(handle) = self.resident_handle(&session_id) {
+            handle
+                .emit_local_background_tasks
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         let (initial_total_tokens, unfinished_subagents) = self
             .replay_transcript_gate(
                 &session_id,
@@ -975,9 +1001,11 @@ impl MvpAgent {
                     cursor: cursor.as_deref(),
                 },
                 no_replay,
+                gateway_backed,
             )
             .await?;
         self.attach_status_line(&session_id, request_meta.as_ref(), init);
+        self.attach_user_message_echo(&session_id, request_meta.as_ref(), init);
         let ClientCaps {
             code_nav: client_code_nav_enabled,
             terminal: client_terminal,
@@ -998,12 +1026,13 @@ impl MvpAgent {
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             spawn_timer.with_subphase(xai_grok_telemetry::startup::Subphase::SessionSpawn);
-            let prefetch = super::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
-                cwd.as_path(),
-                trust_scan,
-                self.plugin_registry_handle.clone(),
-                request_meta.as_ref(),
-            );
+            let prefetch =
+                crate::session::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
+                    cwd.as_path(),
+                    trust_scan,
+                    self.plugin_registry_handle.clone(),
+                    request_meta.as_ref(),
+                );
             let persisted_agent_name: Option<String> = summary.agent_name.clone().or_else(|| {
                 self.resolve_model_id(&summary.current_model_id)
                     .ok()
@@ -1045,6 +1074,10 @@ impl MvpAgent {
                         is_chat_kind: false,
                         prefetch: Some(prefetch),
                     },
+                    Some(xai_grok_telemetry::startup::SpawnTraceContext::new(
+                        spawn_timer.subphase_span(),
+                        tracing::Span::current(),
+                    )),
                 )
                 .await?;
             let agent_id = if won_cold_spawn {
@@ -1111,6 +1144,20 @@ impl MvpAgent {
             });
             false
         };
+        if gateway_backed {
+            if let Some(handle) = self.resident_handle(&session_id) {
+                handle
+                    .emit_local_background_tasks
+                    .store(false, std::sync::atomic::Ordering::Release);
+            }
+            tracing::debug!(
+                session_id = %session_id.0,
+                "skipping local background_tasks snapshot for gateway-backed session"
+            );
+        } else {
+            self.emit_background_tasks_snapshot_and_wait(&session_id)
+                .await;
+        }
         {
             let init_meta = self
                 .initialize_request
@@ -1272,6 +1319,7 @@ impl MvpAgent {
         updates_file_path: &Option<PathBuf>,
         routing: ReplayRouting<'_>,
         no_replay: bool,
+        skip_local_background_tasks_replay: bool,
     ) -> Result<(u64, Vec<crate::session::storage::UnfinishedSubagent>), acp::Error> {
         let session_id = session_id.clone();
         let cwd = cwd.clone();
@@ -1298,6 +1346,7 @@ impl MvpAgent {
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),
+                    skip_local_background_tasks_replay,
                 )
                 .await?;
             let cursor_mark_replay = cursor.is_none();
@@ -1310,6 +1359,7 @@ impl MvpAgent {
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor_mark_replay,
+                    skip_local_background_tasks_replay,
                 ),
                 Err(reason) => {
                     tracing::warn!(
@@ -1339,7 +1389,45 @@ impl MvpAgent {
         }
         Ok((initial_total_tokens, unfinished_subagents))
     }
-    /// Reconnect phase: re-apply per-client capability and permission state to the resident handle, which still reflects the client that spawned it.
+    /// Enqueue a persist+broadcast of the live *local* list before `session/load`
+    /// returns. Cold spawn has an empty registry, so this writes `tasks: []` and
+    /// supersedes a stale persisted Running snapshot. Not used for gateway-backed
+    /// sessions (remote task state is separate).
+    async fn emit_background_tasks_snapshot_and_wait(&self, session_id: &acp::SessionId) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "skipping background_tasks snapshot: session is not resident"
+            );
+            return;
+        };
+        let (respond_to, rx) = tokio::sync::oneshot::channel();
+        if handle
+            .cmd_tx
+            .send(SessionCommand::EmitBackgroundTasksSnapshot {
+                respond_to: Some(respond_to),
+                pending: None,
+            })
+            .is_err()
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "skipping background_tasks snapshot: session command channel closed"
+            );
+            return;
+        }
+        if tokio::time::timeout(BACKGROUND_TASKS_SNAPSHOT_ACK_BUDGET, rx)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "background_tasks snapshot timed out before session/load returned"
+            );
+        }
+    }
+    /// Reconnect phase: re-apply per-client capability and permission state
+    /// to the resident handle, which still reflects the client that spawned it.
     fn refresh_reconnect_session_state(
         &self,
         session_id: &acp::SessionId,
@@ -1585,6 +1673,7 @@ impl MvpAgent {
         {
             let mut git_scan_timer = crate::instrumentation_timer!("session.git_divergence");
             git_scan_timer.with_subphase(xai_grok_telemetry::startup::Subphase::SessionGitScan);
+            git_scan_timer.with_field("git_op", "rev_parse_head");
             let cwd_path = std::path::Path::new(cwd.as_str());
             let current_head =
                 xai_grok_workspace::session::git::git_cli(cwd_path, &["rev-parse", "HEAD"])

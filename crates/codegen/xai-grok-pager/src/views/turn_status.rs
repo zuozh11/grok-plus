@@ -898,6 +898,10 @@ mod tests {
             ),
             (WaitingReason::TasksComplete, "Waiting on tasks…"),
             (WaitingReason::Sleep, "Sleeping…"),
+            (
+                WaitingReason::PromptAck,
+                "Waiting for the agent to accept the prompt…",
+            ),
         ];
         for (reason, expected) in cases {
             let (_, label, is_tool) = compute_activity(

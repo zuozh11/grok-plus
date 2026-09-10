@@ -1,5 +1,5 @@
 //! Full-pipeline mouse tests for the per-task action icons: `[↗]` (view) and
-//! `[✗]`/`[stop]` (kill) in the Tasks pane and the dock.
+//! `[✗]` (Tasks pane kill) / `[stop]` (dock kill).
 //!
 //! Unlike `dock_input_tests`, nothing forges `pane_areas`: every test paints a
 //! real frame with `draw`, locates the icon cells the frame actually painted,
@@ -199,8 +199,8 @@ fn insert_running_subagent(agent: &mut AgentView, child_session_id: &str) {
         Box::new(super::test_fixtures::make_agent()),
     );
 }
-/// Dock subagent row: hovering reveals `[↗][✗]`; the painted `[✗]` must kill
-/// the subagent and the painted `[↗]` must open it fullscreen.
+/// Dock subagent row: hovering reveals `[↗][stop]`; the painted `[stop]` must
+/// kill the subagent and the painted `[↗]` must open it fullscreen.
 #[test]
 fn dock_subagent_icons_hover_and_click_where_painted() {
     crate::views::dock::set_enabled_for_test(true);
@@ -219,12 +219,18 @@ fn dock_subagent_icons_hover_and_click_where_painted() {
     );
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, dock.x + 5, row_y));
     let buf = draw_frame(&mut agent, area);
+    let row: String = (0..area.width).map(|x| buf[(x, row_y)].symbol()).collect();
+    assert!(
+        row.contains('\u{2197}') && row.contains("[stop]"),
+        "hovered dock subagent row must show [↗][stop]: {row:?}"
+    );
     let view_x = (0..area.width)
         .find(|x| buf[(*x, row_y)].symbol() == "\u{2197}")
         .expect("[↗] painted on hovered subagent row");
     let kill_x = (0..area.width)
-        .find(|x| buf[(*x, row_y)].symbol() == "\u{2717}")
-        .expect("[✗] painted on hovered subagent row");
+        .rev()
+        .find(|x| buf[(*x, row_y)].symbol() == "s")
+        .expect("[stop] painted on hovered subagent row");
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, kill_x, row_y));
     let _ = draw_frame(&mut agent, area);
     let outcome = agent.handle_mouse(&mouse(
@@ -234,7 +240,7 @@ fn dock_subagent_icons_hover_and_click_where_painted() {
     ));
     assert!(
         matches!(outcome, InputOutcome::Action(Action::KillSubagent(ref id)) if id == "sa-child-1"),
-        "clicking the painted [✗] must kill the subagent, got {outcome:?}"
+        "clicking the painted [stop] must kill the subagent, got {outcome:?}"
     );
     let _ = agent.handle_mouse(&mouse(MouseEventKind::Moved, view_x, row_y));
     let _ = draw_frame(&mut agent, area);

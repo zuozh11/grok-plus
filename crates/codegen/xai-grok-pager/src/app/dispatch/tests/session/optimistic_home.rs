@@ -434,6 +434,135 @@ fn load_from_welcome_abandons_home() {
     assert!(matches!(app.active_view, ActiveView::Agent(_)));
 }
 
+/// `/resume` reveals the home husk before the picker. LoadSession must still delete it.
+#[test]
+fn resume_after_reveal_then_load_abandons_empty() {
+    let mut app = test_app();
+    maybe_create_home_session(&mut app);
+    bind_home_session(&mut app);
+    let home = app.home_session_agent.expect("home session");
+
+    let _ = dispatch(Action::SendPrompt("/resume".into()), &mut app);
+    assert!(app.home_session_agent.is_none());
+    assert!(app.agents.contains_key(&home));
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == home));
+
+    let effects = dispatch(
+        Action::LoadSession("resume-me".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        !app.agents.contains_key(&home),
+        "LoadSession after /resume reveal must drop the unused empty, got agents {:?}",
+        app.agents.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::DeleteSession {
+                session_id,
+                after: crate::app::actions::AfterSessionDelete::UnusedHusk,
+                ..
+            } if session_id == "home-sid"
+        )),
+        "revealed unused empty must be deleted, got {effects:?}"
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id != home));
+}
+
+#[test]
+fn resume_after_reveal_unbound_then_load_drops_empty() {
+    let mut app = test_app();
+    maybe_create_home_session(&mut app);
+    let home = app.home_session_agent.expect("home session");
+
+    let _ = dispatch(Action::SendPrompt("/resume".into()), &mut app);
+    assert!(app.home_session_agent.is_none());
+    assert!(app.agents.contains_key(&home));
+
+    let _ = dispatch(
+        Action::LoadSession("resume-me".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        !app.agents.contains_key(&home),
+        "unbound revealed husk must still be dropped on LoadSession"
+    );
+}
+
+#[test]
+fn load_session_does_not_abandon_empty_new_session() {
+    let mut app = test_app();
+    let _ = dispatch(Action::NewSession, &mut app);
+    let ActiveView::Agent(new_id) = app.active_view else {
+        panic!(
+            "/new must activate the new session, got {:?}",
+            app.active_view
+        );
+    };
+    let _ = handle_session_created(&mut app, new_id, acp::SessionId::new("new-sid"), None);
+
+    let _ = dispatch(
+        Action::LoadSession("resume-me".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        app.agents.contains_key(&new_id),
+        "LoadSession must not delete an empty /new that was never the home husk"
+    );
+}
+
+#[test]
+fn load_session_keeps_revealed_husk_with_composer_draft() {
+    let mut app = test_app();
+    maybe_create_home_session(&mut app);
+    bind_home_session(&mut app);
+    let home = app.home_session_agent.expect("home session");
+
+    let _ = dispatch(Action::SendPrompt("/resume".into()), &mut app);
+    assert!(app.home_session_agent.is_none());
+    app.agents
+        .get_mut(&home)
+        .expect("revealed husk")
+        .prompt
+        .set_text("unsaved notes");
+
+    let _ = dispatch(
+        Action::LoadSession("resume-me".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        app.agents.contains_key(&home),
+        "LoadSession must not delete the revealed husk while it has an unsaved composer draft"
+    );
+    assert_eq!(app.agents[&home].prompt.text(), "unsaved notes");
+}
+
+#[test]
+fn load_session_keeps_revealed_husk_with_image_undo_stash() {
+    let mut app = test_app();
+    maybe_create_home_session(&mut app);
+    bind_home_session(&mut app);
+    let home = app.home_session_agent.expect("home session");
+
+    let _ = dispatch(Action::SendPrompt("/resume".into()), &mut app);
+    assert!(app.home_session_agent.is_none());
+    app.agents
+        .get_mut(&home)
+        .expect("revealed husk")
+        .prompt
+        .push_image_undo_stash_for_test(crate::app::agent_view::test_fixtures::test_pasted_image());
+
+    let _ = dispatch(
+        Action::LoadSession("resume-me".into(), None, false),
+        &mut app,
+    );
+    assert!(
+        app.agents.contains_key(&home),
+        "LoadSession must not delete the husk while Ctrl+U image undo stash is recoverable"
+    );
+}
+
 #[test]
 fn welcome_menu_enter_activates_item_when_prompt_unfocused() {
     let mut app = test_app();

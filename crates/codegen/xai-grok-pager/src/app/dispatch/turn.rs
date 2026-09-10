@@ -326,23 +326,11 @@ fn cancel_agent_turn(
         && !in_flight_committed
         && !composer_has_draft
         && rewind_prompt_id.is_some();
-    if rewinding && let Some(stashed) = agent.session.in_flight_prompt.take() {
-        if let Some(pid) = rewind_prompt_id.as_deref() {
-            agent.note_rewound_prompt(pid);
-        }
-        agent.prompt.set_text(&stashed.text);
-        agent.prompt.restore_chip_elements(&stashed.chip_elements);
-        agent.prompt.set_images(stashed.images);
-        agent.prompt.set_cursor(stashed.text.len());
-        for id in stashed.combined_scrollback_entries {
-            agent.scrollback.remove_entry(id);
-        }
-        agent.scrollback.remove_entry(stashed.scrollback_entry);
-        // Full state reset: tracker cleanup, state back to Idle, timing fields and current_prompt_id cleared
-        agent.session.finish_turn(&mut agent.scrollback);
-        agent.turn_started_at = None;
-        agent.activity_started_at = None;
-        agent.last_activity = None;
+    if rewinding
+        && let Some(pid) = rewind_prompt_id.as_deref()
+        && let Some(stashed) = agent.session.in_flight_prompt.take()
+    {
+        rewind_in_flight_prompt(agent, stashed, pid, RewindTarget::ReplaceComposer);
     } else {
         agent.cancel_and_arm(CancellationScope::Turn, origin);
     }
@@ -372,6 +360,74 @@ fn cancel_agent_turn(
         cancel_subagents,
         if rewinding { rewind_prompt_id } else { None },
     )]
+}
+
+/// Turn-end view teardown shared by every path that ends a turn: timing marker, stale permission
+/// prompts (each gets Cancelled), the cancel panel, and the bash-mode focus reset.
+pub(super) fn finish_turn_view(agent: &mut AgentView, end: TurnEnd) {
+    agent.mark_turn_finished(end);
+    agent.activity_started_at = None;
+    agent.last_activity = None;
+    drain_permission_queue(agent);
+    agent.cancel_turn_view = None;
+    agent.cancel_turn_buttons.clear();
+    // After a bash-mode turn, scroll to bottom so the user sees the command output
+    if agent.bash_turn {
+        agent.bash_turn = false;
+        agent.scrollback.goto_bottom();
+    }
+}
+
+/// Where a rewound prompt's text goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RewindTarget {
+    /// The composer is empty: restore text, chips, images, and cursor verbatim.
+    ReplaceComposer,
+    /// The composer holds a newer image-free draft: prepend the rewound text; the draft's chips fall back to raw text.
+    MergeIntoDraft,
+}
+
+/// Pull a sent-but-unacknowledged prompt back into the composer and end its turn locally.
+/// Records the prompt id as rewound so a late queue broadcast, update, or response for it is dropped by the existing gates.
+pub(super) fn rewind_in_flight_prompt(
+    agent: &mut AgentView,
+    stashed: crate::app::agent::InFlightPrompt,
+    rewind_prompt_id: &str,
+    target: RewindTarget,
+) {
+    agent.note_rewound_prompt(rewind_prompt_id);
+    match target {
+        RewindTarget::ReplaceComposer => {
+            agent.prompt.set_text(&stashed.text);
+            agent.prompt.restore_chip_elements(&stashed.chip_elements);
+            agent.prompt.set_images(stashed.images);
+            agent.prompt.set_cursor(stashed.text.len());
+        }
+        RewindTarget::MergeIntoDraft => {
+            let merged = format!("{}\n\n{}", stashed.text, agent.prompt.text());
+            agent.prompt.set_text(&merged);
+            // The rewound text is the prefix, so its chip ranges still hold; the draft's chips fall back to raw text
+            agent.prompt.restore_chip_elements(&stashed.chip_elements);
+            agent.prompt.set_images(stashed.images);
+            agent.prompt.set_cursor(merged.len());
+        }
+    }
+    // A block already printed into native scrollback (minimal mode) cannot be un-printed; the text still comes back
+    for id in stashed
+        .combined_scrollback_entries
+        .into_iter()
+        .chain([stashed.scrollback_entry])
+    {
+        if !agent.scrollback.is_committed(id) {
+            agent.scrollback.remove_entry(id);
+        }
+    }
+    // Full state reset: tracker cleanup, state back to Idle, timing fields and current_prompt_id cleared
+    agent.session.finish_turn(&mut agent.scrollback);
+    agent.prompt_ack = None;
+    agent.turn_started_at = None;
+    agent.activity_started_at = None;
+    agent.last_activity = None;
 }
 
 /// Build `Effect::CancelTurn`, consuming the gesture hint and arming the resend reconcile (skipped for a rewind, which leaves no cancelling state).
@@ -604,22 +660,8 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                     && crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback),
             },
         );
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            Some(pending.prompt_id.as_str()),
-        );
-
-        agent.mark_turn_finished(TurnEnd::Completed);
-        agent.activity_started_at = None;
-        agent.last_activity = None;
-        drain_permission_queue(agent);
-        agent.cancel_turn_view = None;
-        agent.cancel_turn_buttons.clear();
-        if agent.bash_turn {
-            agent.bash_turn = false;
-            agent.scrollback.goto_bottom();
-        }
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
+        finish_turn_view(agent, TurnEnd::Completed);
 
         // FIFO handoff (mirrors the PromptResponse arm): adopt the next server-authoritative running prompt now that the slot is free
         let adopted_page_flip = if let Some(p) = pending_adoption

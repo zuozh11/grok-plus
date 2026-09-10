@@ -288,31 +288,19 @@ impl SessionActor {
             Err(e) => (format!("Error running command: {}", e), -1, false, None),
         };
 
-        // Create final summary with last N lines
-        // Format: "... (X lines)\nlast\nfew\nlines"
-        let lines: Vec<&str> = output.lines().collect();
+        // Full stdout for the TUI; prompt/history keep a last-N tail so dumps do not inflate the next turn
+        let full_output = output.trim_end().to_string();
+        let lines: Vec<&str> = full_output.lines().collect();
         let total_lines = lines.len();
-        let displayed_output = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
+        let history_output = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
             let start = total_lines - BASH_MODE_FINAL_OUTPUT_LINES;
             let last_lines = lines[start..].join("\n");
             format!("... ({} lines)\n{}", total_lines, last_lines)
         } else {
-            output.trim_end().to_string()
+            full_output.clone()
         };
 
         let is_backgrounded = signal.as_deref() == Some("backgrounded");
-
-        // Build the final response text with output summary and exit code
-        let mut response_text = displayed_output.clone();
-        if is_backgrounded {
-            response_text.push_str("\n\n[command running in background]");
-        } else if timed_out {
-            response_text.push_str("\n\n[command timed out]");
-        } else if let Some(ref sig) = signal {
-            response_text.push_str(&format!("\n\n[killed by signal {}]", sig));
-        } else {
-            response_text.push_str(&format!("\n\n[exit code: {}]", exit_code));
-        }
 
         // Send final tool call update
         // For backgrounded commands, don't mark as completed/failed; let the background task do that
@@ -323,17 +311,17 @@ impl SessionActor {
                 acp::ToolCallStatus::Failed
             };
             let bash_output = BashOutput {
-                output_for_prompt: BashOutput::make_output_for_prompt(&displayed_output),
-                output: displayed_output.as_bytes().to_vec(),
+                output_for_prompt: BashOutput::make_output_for_prompt(&history_output),
+                output: full_output.as_bytes().to_vec(),
                 exit_code,
                 command: command.clone(),
-                truncated: total_lines > BASH_MODE_FINAL_OUTPUT_LINES,
+                truncated: false,
                 signal: signal.clone(),
                 timed_out,
                 description: None,
                 current_dir: self.tool_context.cwd.to_string(),
                 output_file: String::new(),
-                total_bytes: displayed_output.len(),
+                total_bytes: full_output.len(),
                 output_delta: None,
                 was_bare_echo: false,
             };
@@ -355,7 +343,7 @@ impl SessionActor {
         // Build a single user message for chat history that includes command, output, and exit code
         let user_message = format!(
             "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n[exit code: {}]",
-            command, displayed_output, exit_code
+            command, history_output, exit_code
         );
 
         // Add to chat history as a user message only

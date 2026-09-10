@@ -1,7 +1,7 @@
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
-use crate::agent::init::{bootstrap, exit_on_config_error};
-use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
+use crate::agent::init::{bootstrap_with_cancel, exit_on_config_error};
 use crate::agent::mvp_agent::MvpAgent;
+use crate::agent::remote_config::{ModelFetchAuth, prefetch_models_blocking};
 use crate::leader::protocol::InternalMethod;
 use crate::util::grok_home;
 use agent_client_protocol as acp;
@@ -118,14 +118,21 @@ fn spawn_agent_local(
     agent_config: AgentConfig,
     auth_manager: Arc<AuthManager>,
     prefetched_models: Option<IndexMap<String, ModelEntry>>,
+    boot: Option<crate::agent::init::BootstrapPrefetch>,
     memory_config: Option<crate::config::MemoryConfig>,
     outgoing: impl futures::AsyncWrite + Unpin + 'static,
     incoming: impl futures::AsyncRead + Unpin + 'static,
 ) -> impl std::future::Future<Output = Result<(), acp::Error>> {
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
-    let mut agent = MvpAgent::new(gateway, &agent_config, auth_manager, prefetched_models)
-        .unwrap_or_else(exit_on_config_error);
+    let mut agent = MvpAgent::new(
+        gateway,
+        &agent_config,
+        auth_manager,
+        prefetched_models,
+        boot,
+    )
+    .unwrap_or_else(exit_on_config_error);
     agent.models_manager.spawn_background_refresh();
     if let Some(mc) = memory_config {
         agent.set_memory_config(mc);
@@ -231,7 +238,7 @@ pub async fn run_stdio_agent(
     }
     let _total_timer = crate::instrumentation_timer!("startup.stdio_agent_total");
     let outgoing = tokio::io::stdout().compat_write();
-    let agent_config = agent_config.clone();
+    let mut agent_config = agent_config.clone();
     let (acp_incoming_rx, acp_incoming_tx) = simplex(MAX_BUFFER_SIZE);
     let incoming = acp_incoming_rx.compat();
     let acp_incoming_tx = Arc::new(TokioMutex::new(acp_incoming_tx));
@@ -265,11 +272,19 @@ pub async fn run_stdio_agent(
             auth_manager.start_proactive_refresh(cancel_for_agent.clone());
             auth_manager.start_system_power_listener();
             crate::managed_config::ensure_managed_policy_present(&auth_manager).await;
+            let boot = crate::agent::init::resolve_boot_startup_settings(
+                &mut agent_config,
+                &cancel_for_agent,
+                prefetched_models.is_none(),
+                auth_manager.current(),
+            )
+            .await?;
             apply_otel_config(&auth_manager, &agent_config.grok_com_config);
             let handle_io = spawn_agent_local(
                 agent_config,
                 auth_manager,
                 prefetched_models,
+                Some(boot),
                 memory_config,
                 outgoing,
                 incoming,
@@ -404,7 +419,7 @@ pub async fn run_headless(
         Some(on_first_connect),
     );
     let local_set = tokio::task::LocalSet::new();
-    let agent_config_clone = agent_config.clone();
+    let mut agent_config_clone = agent_config.clone();
     let memory_config_for_first = memory_config;
     let agent_cancel = cancel.clone();
     local_set
@@ -416,11 +431,24 @@ pub async fn run_headless(
                 auth_manager.start_proactive_refresh(agent_cancel.clone());
                 crate::managed_config::ensure_managed_policy_present(&auth_manager)
                     .await;
+                let boot = match crate::agent::init::resolve_boot_startup_settings(
+                        &mut agent_config_clone,
+                        &agent_cancel,
+                        prefetched_models.is_none(),
+                        auth_manager.current(),
+                    )
+                    .await
+                {
+                    Ok(boot) => boot,
+                    Err(crate::agent::init::BootstrapError::Cancelled) => return,
+                    Err(err) => exit_on_config_error(err),
+                };
                 let mut agent = MvpAgent::new(
                         gateway,
                         &agent_config_clone,
                         auth_manager,
                         prefetched_models,
+                        Some(boot),
                     )
                     .unwrap_or_else(exit_on_config_error);
                 agent.models_manager.spawn_background_refresh();
@@ -810,11 +838,25 @@ pub async fn run_leader(
     let auth_manager_for_agent = shared_auth_manager.clone();
     let auth_manager_for_config = shared_auth_manager.clone();
     let auth_manager_for_mint = shared_auth_manager.clone();
-    crate::agent::models::startup_prefetch::begin_before_policy_gate(&agent_config_for_spawn);
     crate::managed_config::ensure_managed_policy_present(&auth_manager_for_agent).await;
-    let (agent_config_for_spawn, shared_models_manager) =
-        bootstrap(&agent_config_for_spawn, &auth_manager_for_agent, None)
-            .unwrap_or_else(exit_on_config_error);
+    let boot = crate::agent::init::resolve_boot_startup_settings(
+        &mut agent_config_for_spawn,
+        &cancel_clone,
+        true,
+        auth_manager_for_agent.current(),
+    )
+    .await?;
+    let (agent_config_for_spawn, shared_models_manager) = match bootstrap_with_cancel(
+        &agent_config_for_spawn,
+        &auth_manager_for_agent,
+        None,
+        &cancel_clone,
+        Some(boot),
+    ) {
+        Ok(v) => v,
+        Err(e @ crate::agent::init::BootstrapError::Cancelled) => return Err(e.into()),
+        Err(e) => exit_on_config_error(e),
+    };
     shared_models_manager.spawn_background_refresh();
     let models_manager_for_agent = shared_models_manager.clone();
     let models_manager_for_config = shared_models_manager;

@@ -65,7 +65,7 @@ impl xai_grok_tools::implementations::grok_build::task::coordinator::ChildRunner
         }
         let ctx = self.contexts.lock().pop_front().expect("run context");
         let gateway = self.gateway.clone();
-        let completion_data = ShellCompletionData::from_context(&ctx);
+        let completion_data = ShellCompletionData::from_context(&ctx, run.attempt_id.clone(), None);
         Box::pin(async move { run_shell_child(run, ctx, completion_data, gateway, None).await })
     }
 
@@ -522,6 +522,78 @@ async fn ordinary_spawn_with_failed_metadata_write_persists_output_and_disposes_
             assert_eq!(persisted.status, "completed");
             let worktree = persisted.worktree_path.as_deref().expect("worktree path");
             assert!(!std::path::Path::new(worktree).exists());
+            assert!(persisted.snapshot_ref.is_some());
+
+            drop(backend);
+            coordinator.await.expect("coordinator");
+            usage_ack.abort();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_spawn_disposes_worktree_when_only_remote_settings_enable_snapshot() {
+    xai_test_utils::require_git!();
+    use xai_grok_tools::implementations::grok_build::task::backend::{
+        ChannelBackend, SubagentBackend,
+    };
+    use xai_grok_tools::implementations::grok_build::task::coordinator::{
+        CoordinatorConfig, SubagentCoordinator,
+    };
+    use xai_test_utils::git::seed_repo_with_remote;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let temp = tempfile::TempDir::new().expect("tempdir");
+            let (repo, _remote) = seed_repo_with_remote(temp.path());
+            let meta_dir = temp.path().join("meta");
+            let server = xai_grok_test_support::MockInferenceServer::start()
+                .await
+                .expect("mock server");
+            server.set_response("ordinary output");
+            let id = uuid::Uuid::now_v7().to_string();
+            let mut ctx = ctx_with_toggle(HashMap::new());
+            configure_completion_harness(
+                &mut ctx,
+                &server,
+                RunShellChildHarnessConfig::new(meta_dir.clone(), InitialAttemptBehavior::Normal),
+            );
+            ctx.parent_cwd = repo;
+            ctx.remote_settings = Some(crate::util::config::RemoteSettings {
+                subagent_worktree_snapshot_enabled: Some(true),
+                ..Default::default()
+            });
+            let (parent_cmd_tx, parent_cmd_rx) = mpsc::unbounded_channel();
+            ctx.parent_cmd_tx = Some(parent_cmd_tx);
+            let usage_ack = tokio::task::spawn_local(acknowledge_parent_usage(parent_cmd_rx));
+            let (gateway, _gateway_rx) = test_gateway_with_receiver();
+            let (command_tx, command_rx) =
+                SubagentCoordinator::<RunShellChildTestRunner>::channel();
+            let coordinator = tokio::task::spawn_local(
+                SubagentCoordinator::from_channel(
+                    command_rx,
+                    RunShellChildTestRunner::new([ctx], false, gateway),
+                    CoordinatorConfig::default(),
+                )
+                .run(),
+            );
+            let backend = ChannelBackend::for_coordinator_session(command_tx, "setup-parent");
+            let mut request = auto_wake_test_request(&id);
+            request.runtime_overrides.isolation =
+                Some(xai_tool_types::SubagentIsolationMode::Worktree);
+            let result = backend.spawn(request, None).await.expect("ordinary spawn");
+            assert!(result.success);
+            let persisted: SubagentMeta = serde_json::from_str(
+                &std::fs::read_to_string(meta_dir.join("meta.json")).expect("completion meta"),
+            )
+            .expect("metadata");
+            assert_eq!(persisted.status, "completed");
+            let worktree = persisted.worktree_path.as_deref().expect("worktree path");
+            assert!(
+                !std::path::Path::new(worktree).exists(),
+                "remote subagent_worktree_snapshot_enabled must reach the post-spawn dispose gate"
+            );
             assert!(persisted.snapshot_ref.is_some());
 
             drop(backend);

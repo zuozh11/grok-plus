@@ -106,6 +106,9 @@ pub struct PromptContext {
     /// When true, the system prompt includes a `<memory>` section telling the model it can use `memory_search` and `memory_get`.
     #[serde(default)]
     pub memory_enabled: bool,
+    /// Whether isolated filesystem-based Memory is enabled.
+    #[serde(default)]
+    pub memory_v2_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_global_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +170,7 @@ impl Default for PromptContext {
             persona_summaries: vec![],
             build_timestamp_utc: chrono::Utc::now().to_rfc3339(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -215,6 +219,7 @@ impl PromptContext {
     pub fn placeholders(&self) -> serde_json::Value {
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
+            "memory_v2_enabled": self.memory_v2_enabled,
             "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
             "memory_workspace_path": self.memory_workspace_path.as_deref().unwrap_or(""),
             "role_instructions": self.role_instructions.as_deref().unwrap_or(""),
@@ -287,6 +292,7 @@ mod tests {
             persona_summaries: vec![],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -421,6 +427,7 @@ mod tests {
         let ctx = test_context();
         let p = ctx.placeholders();
         assert_eq!(p["memory_enabled"], false);
+        assert_eq!(p["memory_v2_enabled"], false);
         assert!(p.get("role_instructions").is_some());
         assert!(p.get("persona_instructions").is_some());
         assert_eq!(p["system_prompt_label"], DEFAULT_SYSTEM_PROMPT_LABEL);
@@ -446,6 +453,7 @@ mod tests {
         ctx.working_directory = Some("/workspace".into());
         ctx.current_date = Some("2026-03-26".into());
         ctx.memory_enabled = true;
+        ctx.memory_v2_enabled = true;
         ctx.role_instructions = Some("test role".into());
         ctx.persona_instructions = Some("test persona".into());
         let p = ctx.placeholders();
@@ -454,6 +462,7 @@ mod tests {
         assert_eq!(p["working_directory"], "/workspace");
         assert_eq!(p["current_date"], "2026-03-26");
         assert_eq!(p["memory_enabled"], true);
+        assert_eq!(p["memory_v2_enabled"], true);
         assert_eq!(p["role_instructions"], "test role");
         assert_eq!(p["persona_instructions"], "test persona");
     }
@@ -589,6 +598,7 @@ mod tests {
             ],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: true,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,

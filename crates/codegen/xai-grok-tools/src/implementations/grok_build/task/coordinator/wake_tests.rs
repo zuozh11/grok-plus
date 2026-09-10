@@ -294,16 +294,24 @@ async fn completed_agent_message_wakes_same_id_and_queues_next_turn() {
             let backend = backend.clone();
             async move { backend.spawn(request("identity-source", true), None).await }
         });
+        let first_run = harness.wake_runs.recv().await.expect("initial run");
         assert_eq!(
-            harness.wake_runs.recv().await,
-            Some((
-                "identity-source".to_owned(),
+            (
+                &first_run.0,
+                &first_run.2,
+                &first_run.3,
+                first_run.4,
+                &first_run.5,
+            ),
+            (
+                &"identity-source".to_owned(),
+                &None,
+                &"work".to_owned(),
                 None,
-                "work".to_owned(),
-                None,
-                None,
-            ))
+                &None,
+            )
         );
+        assert!(xai_message_delivery_core::AttemptId::parse(first_run.1.as_str()).is_some());
         assert_eq!(
             harness.started.recv().await.as_deref(),
             Some("identity-source")
@@ -329,7 +337,7 @@ async fn completed_agent_message_wakes_same_id_and_queues_next_turn() {
         });
         let wake_run = harness.wake_runs.recv().await.expect("wake run");
         assert_eq!(
-            (&wake_run.0, &wake_run.1, &wake_run.2, wake_run.3),
+            (&wake_run.0, &wake_run.2, &wake_run.3, wake_run.4),
             (
                 &"identity-source".to_owned(),
                 &Some("identity-source".to_owned()),
@@ -337,7 +345,9 @@ async fn completed_agent_message_wakes_same_id_and_queues_next_turn() {
                 Some(ActiveAgentMessageSource::Agent),
             )
         );
-        let wake_message_id = wake_run.4.expect("wake message id");
+        assert!(xai_message_delivery_core::AttemptId::parse(wake_run.1.as_str()).is_some());
+        assert_ne!(first_run.1, wake_run.1);
+        let wake_message_id = wake_run.5.expect("wake message id");
         assert_eq!(
             harness.started.recv().await.as_deref(),
             Some("identity-source")
@@ -374,7 +384,7 @@ async fn complete_child(harness: &mut Harness, backend: &ChannelBackend, id: &st
 }
 
 #[derive(Clone, Copy)]
-enum WakeOrigin {
+enum WakeAdmissionOrigin {
     Direct,
     Dequeued,
 }
@@ -385,13 +395,13 @@ enum PreStartExit {
     Cancellation,
 }
 
-async fn run_pre_start_wake_restore_scenario(origin: WakeOrigin, exit: PreStartExit) {
+async fn run_pre_start_wake_restore_scenario(origin: WakeAdmissionOrigin, exit: PreStartExit) {
     const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
     tokio::time::timeout(TEST_TIMEOUT, async move {
         let is_failure = matches!(exit, PreStartExit::Failure);
         let config = match origin {
-            WakeOrigin::Direct => buffering(),
-            WakeOrigin::Dequeued => CoordinatorConfig {
+            WakeAdmissionOrigin::Direct => buffering(),
+            WakeAdmissionOrigin::Dequeued => CoordinatorConfig {
                 limits: SubagentLimits {
                     max_concurrent: 1,
                     behavior: LimitBehavior::Queue,
@@ -426,7 +436,7 @@ async fn run_pre_start_wake_restore_scenario(origin: WakeOrigin, exit: PreStartE
         let _ = buffered_completions(&harness, Some("parent")).await;
 
         let mut held = None;
-        if matches!(origin, WakeOrigin::Dequeued) {
+        if matches!(origin, WakeAdmissionOrigin::Dequeued) {
             let spawn = tokio::spawn({
                 let backend = backend.clone();
                 async move { backend.spawn(request("held", true), None).await }
@@ -450,10 +460,10 @@ async fn run_pre_start_wake_restore_scenario(origin: WakeOrigin, exit: PreStartE
             }
         });
         match origin {
-            WakeOrigin::Direct => {
+            WakeAdmissionOrigin::Direct => {
                 harness.wake_runs.recv().await.expect("wake run observed");
             }
-            WakeOrigin::Dequeued => {
+            WakeAdmissionOrigin::Dequeued => {
                 await_queued(&harness.backend, 1).await;
                 let _ = harness.finish.send(());
                 assert!(
@@ -518,7 +528,7 @@ async fn run_pre_start_wake_restore_scenario(origin: WakeOrigin, exit: PreStartE
         );
         assert!(harness.completions.try_recv().is_err());
         let buffered = buffered_completions(&harness, Some("parent")).await;
-        if matches!(origin, WakeOrigin::Dequeued) {
+        if matches!(origin, WakeAdmissionOrigin::Dequeued) {
             assert_eq!(buffered.len(), 1);
             assert_eq!(buffered[0].subagent_id(), "held");
         } else {
@@ -614,7 +624,7 @@ async fn failed_wake_refuses_sends_until_runner_teardown_completes() {
 
 #[tokio::test]
 async fn pre_start_wake_exits_restore_prior_observers() {
-    for origin in [WakeOrigin::Direct, WakeOrigin::Dequeued] {
+    for origin in [WakeAdmissionOrigin::Direct, WakeAdmissionOrigin::Dequeued] {
         for exit in [PreStartExit::Failure, PreStartExit::Cancellation] {
             run_pre_start_wake_restore_scenario(origin, exit).await;
         }
@@ -670,7 +680,7 @@ async fn completed_wake_queues_at_concurrent_limit_until_slot_frees() {
     harness.completions.recv().await.unwrap();
     let wake_run = harness.wake_runs.recv().await.expect("wake run");
     assert_eq!(
-        (&wake_run.0, &wake_run.1, &wake_run.2, wake_run.3),
+        (&wake_run.0, &wake_run.2, &wake_run.3, wake_run.4),
         (
             &"identity-source".to_owned(),
             &Some("identity-source".to_owned()),
@@ -678,7 +688,7 @@ async fn completed_wake_queues_at_concurrent_limit_until_slot_frees() {
             Some(ActiveAgentMessageSource::Agent),
         )
     );
-    let wake_message_id = wake_run.4.expect("wake message id");
+    let wake_message_id = wake_run.5.expect("wake message id");
     harness.started.recv().await.unwrap();
     assert_eq!(
         wake.await.unwrap(),

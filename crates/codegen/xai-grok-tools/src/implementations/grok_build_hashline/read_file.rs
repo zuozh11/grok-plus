@@ -516,6 +516,42 @@ mod tests {
         }
     }
 
+    /// Memory v2 stale-read protection depends on every ordinary read tool
+    /// recording the bytes it observed; hashline_read inherits this from
+    /// `run_read_file` and must keep doing so.
+    #[tokio::test]
+    async fn read_records_memory_v2_snapshot() {
+        use crate::implementations::grok_build_hashline::memory_v2_test_support::FakeMemoryV2Access;
+        use crate::types::memory_v2::MemoryV2AccessResource;
+
+        let tmp = TempDir::new().unwrap();
+        let access = Arc::new(FakeMemoryV2Access::new(&tmp.path().join("memory")));
+        let topic = tmp.path().join("memory/topics/facts.md");
+        std::fs::write(&topic, "one\ntwo\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(MemoryV2AccessResource(access.clone()));
+
+        let result = xai_tool_runtime::Tool::run(
+            &HashlineReadTool,
+            test_ctx(resources.into_shared()),
+            ReadFileInput {
+                path: "memory/topics/facts.md".to_string(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result, ReadFileOutput::FileContent(_)),
+            "expected FileContent, got {result:?}"
+        );
+        assert_eq!(access.recorded_reads(), vec![topic]);
+    }
+
     #[tokio::test]
     async fn read_nonexistent_file() {
         let tmp = TempDir::new().unwrap();

@@ -1236,15 +1236,10 @@ impl SessionActor {
         let hook_registry_snapshot = self.hook_registry.borrow().clone();
         if let Some(registry) = hook_registry_snapshot {
             let ctx = self.hook_run_ctx();
+            let batch = self.announce_hook_run(&registry, &envelope, &ctx);
             let pre_result =
                 xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
-            self.send_hook_execution(
-                "pre_tool_use",
-                Some(resolved_tool_name),
-                None,
-                &pre_result.results,
-            )
-            .await;
+            self.send_hook_execution(&batch, &pre_result.results).await;
             self.emit_hook_executed_telemetry(
                 "pre_tool_use",
                 Some(resolved_tool_name),
@@ -1749,7 +1744,6 @@ impl SessionActor {
                             tool_input_truncated,
                         },
                         None,
-                        Some(&resolved_tool_name),
                     )
                     .await;
                     let loop_action = if is_policy_deny {
@@ -2112,7 +2106,7 @@ impl SessionActor {
             ToolInput::SendSubagentMessage(message) => serde_json::to_value(message)?,
             _ => serde_json::to_value(&tool_call_input)?,
         };
-        let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
+        let mut canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
         let (title, kind, locations, content) = match tool_call_input {
             ToolInput::ListDir(list_dir) => (
                 format!("List `{}`", list_dir.target_directory),
@@ -2408,6 +2402,8 @@ impl SessionActor {
                         },
                         WorkflowSource::Name { name } => format!("Workflow: {name}"),
                         WorkflowSource::Resume { .. } => "Workflow: resume run".to_string(),
+                        WorkflowSource::Pause { .. } => "Workflow: pause run".to_string(),
+                        WorkflowSource::Stop { .. } => "Workflow: stop run".to_string(),
                         WorkflowSource::ScriptPath { .. } => "Workflow: launch script".to_string(),
                     }
                 };
@@ -2464,6 +2460,38 @@ impl SessionActor {
                 vec![],
             ),
         };
+        if let Some(access) = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .read_resource::<xai_grok_tools::types::memory_v2::MemoryV2AccessResource>()
+            .await
+        {
+            let roots = access.0.scope_roots();
+            let path_is_memory = |path: &Path| {
+                let resolved = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    self.tool_context
+                        .cwd
+                        .join(path.to_string_lossy())
+                        .to_path_buf()
+                };
+                roots.iter().any(|root| resolved.starts_with(root))
+            };
+            let is_memory_activity = locations
+                .iter()
+                .any(|location| path_is_memory(&location.path))
+                || ["path", "file_path", "target_directory"]
+                    .iter()
+                    .filter_map(|key| raw_input.get(key).and_then(|value| value.as_str()))
+                    .any(|path| path_is_memory(Path::new(path)));
+            if is_memory_activity {
+                canonical_meta
+                    .get_or_insert_with(Default::default)
+                    .insert("memory_v2_activity".to_owned(), true.into());
+            }
+        }
         let tool_call_update = acp::ToolCallUpdate::new(
             tool_call_id.clone(),
             acp::ToolCallUpdateFields::new()
@@ -2527,7 +2555,7 @@ impl SessionActor {
             trigger: xai_grok_telemetry::events::SkillTrigger::SkillMdRead,
         });
     }
-    fn make_pre_tool_use_envelope(
+    pub(super) fn make_pre_tool_use_envelope(
         &self,
         resolved_tool_name: &str,
         call_id: &str,

@@ -3,6 +3,7 @@ use xai_grok_tools::types::TaskSnapshot;
 
 use crate::session::feedback::FeedbackRequest as FeedbackRequestData;
 
+pub use crate::extensions::background_task::{BackgroundTaskRow, BackgroundTaskStatus};
 pub use crate::session::goal_tracker::GoalClassifierVerdict;
 
 /// Retained for wire backwards compatibility; always empty in the simplified goal model (no deliverables).
@@ -428,6 +429,23 @@ pub struct HookRunEntryDto {
     pub output: Option<String>,
 }
 
+/// What a `HookAnnotation` is, so the pager can pick the row bullet (the message itself carries none).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAnnotationKind {
+    /// A hook's own message, shown as plain text.
+    #[default]
+    Note,
+    /// A hook's verdict on the tool call above it (a deny): the pager gives it the tool-row bullet.
+    ToolOutcome,
+}
+
+impl HookAnnotationKind {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Why auto-compaction stopped before completing.
 #[derive(
     Debug,
@@ -545,10 +563,24 @@ pub enum SessionUpdate {
     /// A hook annotation message for the TUI scrollback.
     /// Rendered inline with the preceding tool call block.
     HookAnnotation {
-        /// The hook message to display (e.g., "🪝 Running post_tool_use hooks for `Edit`...")
+        /// The hook message, text only: the pager draws the row bullet from `kind`.
         message: String,
+        #[serde(default, skip_serializing_if = "HookAnnotationKind::is_default")]
+        kind: HookAnnotationKind,
     },
-    /// Structured hook execution data attached to tool call blocks.
+    /// The turn is blocked on an awaited hook batch that just started; sent only when at least one hook will run.
+    /// The pager shows a spinner phase once the batch outlives its reveal delay; the matching `HookExecution` or later turn output ends it.
+    HookRunStarted {
+        event_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_name: Option<String>,
+        /// Lets the pager keep a late turn-end report (`stop_cancelled` / `stop_failure`) off the next turn's phase.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+        /// Hooks that will run (enabled and matcher-allowed).
+        count: usize,
+    },
+    /// Outcome of a hook batch. Successful runs leave no scrollback trace; the pager renders one line per failed run.
     HookExecution {
         /// The hook event name ("pre_tool_use" or "post_tool_use").
         event_name: String,
@@ -763,6 +795,21 @@ pub enum SessionUpdate {
         /// The pager prefers it over the raw `command` in its "Task started" line and tasks pane. `None` when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+    },
+    /// Last-wins full list for this session's backgrounded tasks.
+    ///
+    /// Latest snapshot replaces the previous. `tasks: []` clears Running UI.
+    /// Membership is `is_backgrounded` and `owner_session_id` for this session
+    /// (`None` owner counts as this session). No stdout; use incrementals or
+    /// `get_task_output` for logs.
+    ///
+    /// `truncated` means the list was fitted to the 32 KiB session_notification
+    /// frame. This is still last-wins, not a page: consumers must not treat a
+    /// truncated snapshot as the complete set.
+    BackgroundTasks {
+        tasks: Vec<BackgroundTaskRow>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
     },
     ScheduledTaskCreated {
         task_id: String,

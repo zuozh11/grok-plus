@@ -88,6 +88,11 @@ pub async fn fork_session(
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
+        prompt_display_cwd: request
+            .source_workspace_dir
+            .clone()
+            .filter(|display| display != &request.new_cwd),
+        skip_cwd_transform: request.session_kind.as_deref() == Some("worktree"),
         // Carry the parent's compaction segment archive into the fork so the child retains pre-compaction history
         // The live summary is already copied via chat_history.jsonl
         copy_compaction_segments: true,

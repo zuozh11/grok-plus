@@ -222,13 +222,6 @@ impl ChannelBackend {
         }
     }
 
-    pub fn from_event_sender(sender: SubagentEventSender) -> Self {
-        Self {
-            tx: ChannelBackendSender::Legacy(sender),
-            parent_session_id: None,
-        }
-    }
-
     pub fn from_coordinator(sender: SubagentCoordinatorSender) -> Self {
         Self {
             tx: ChannelBackendSender::Coordinator(sender),
@@ -243,16 +236,6 @@ impl ChannelBackend {
     ) -> Self {
         Self {
             tx: ChannelBackendSender::Legacy(SubagentEventSender(tx)),
-            parent_session_id: Some(parent_session_id.into()),
-        }
-    }
-
-    pub fn for_event_sender_session(
-        sender: SubagentEventSender,
-        parent_session_id: impl Into<Arc<str>>,
-    ) -> Self {
-        Self {
-            tx: ChannelBackendSender::Legacy(sender),
             parent_session_id: Some(parent_session_id.into()),
         }
     }

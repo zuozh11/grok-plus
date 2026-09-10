@@ -235,6 +235,7 @@ enum TerminalCommand {
     },
 
     ListTasks {
+        include_output: bool,
         reply: oneshot::Sender<Vec<TaskSnapshot>>,
     },
 
@@ -474,6 +475,39 @@ impl ProcessState {
             output_file: self.output_file.clone(),
             truncated: self.truncated || short_of_full_log,
             output_total_bytes: self.total_bytes,
+            exit_code: self.lifecycle.exit_status().and_then(|s| s.exit_code),
+            signal: self.lifecycle.exit_status().and_then(|s| s.signal.clone()),
+            completed: self.is_complete(),
+            block_waited: self.block_waited,
+            explicitly_killed: self.explicitly_killed,
+            kill_result_delivered: self.kill_result_delivered,
+            kind: self.kind,
+            owner_session_id: self.owner_session_id.clone(),
+            description: self.description.clone(),
+            is_backgrounded: self.bg_status.is_backgrounded(),
+        }
+    }
+
+    /// Metadata-only row: no log reads, empty stdout.
+    fn to_task_snapshot_metadata(&self, task_id: &str) -> TaskSnapshot {
+        TaskSnapshot {
+            task_id: task_id.to_string(),
+            command: self.command.clone(),
+            display_command: self.display_command.clone(),
+            cwd: self.cwd.clone(),
+            start_time: self.start_wall_time,
+            end_time: if self.lifecycle.has_exited() {
+                Some(
+                    self.end_wall_time
+                        .unwrap_or_else(std::time::SystemTime::now),
+                )
+            } else {
+                None
+            },
+            output: String::new(),
+            output_file: self.output_file.clone(),
+            truncated: false,
+            output_total_bytes: 0,
             exit_code: self.lifecycle.exit_status().and_then(|s| s.exit_code),
             signal: self.lifecycle.exit_status().and_then(|s| s.signal.clone()),
             completed: self.is_complete(),
@@ -1017,14 +1051,29 @@ impl LocalTerminalActor {
                 self.handle_wait_for_completion(task_id, timeout, reply)
                     .await;
             }
-            TerminalCommand::ListTasks { reply } => {
+            TerminalCommand::ListTasks {
+                include_output,
+                reply,
+            } => {
                 let mut snapshots =
                     Vec::with_capacity(self.processes.len() + self.completed_task_snapshots.len());
                 for (id, p) in &self.processes {
-                    snapshots.push(p.to_task_snapshot(id).await);
+                    if include_output {
+                        snapshots.push(p.to_task_snapshot(id).await);
+                    } else {
+                        snapshots.push(p.to_task_snapshot_metadata(id));
+                    }
                 }
                 for snap in self.completed_task_snapshots.values() {
-                    snapshots.push(snap.clone());
+                    if include_output {
+                        snapshots.push(snap.clone());
+                    } else {
+                        let mut meta = snap.clone();
+                        meta.output.clear();
+                        meta.output_total_bytes = 0;
+                        meta.truncated = false;
+                        snapshots.push(meta);
+                    }
                 }
                 let _ = reply.send(snapshots);
             }
@@ -2567,7 +2616,26 @@ impl TerminalBackend for LocalTerminalBackend {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(TerminalCommand::ListTasks { reply: reply_tx })
+            .send(TerminalCommand::ListTasks {
+                include_output: true,
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            return vec![];
+        }
+        reply_rx.await.unwrap_or_default()
+    }
+
+    async fn list_tasks_metadata(&self) -> Vec<TaskSnapshot> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(TerminalCommand::ListTasks {
+                include_output: false,
+                reply: reply_tx,
+            })
             .await
             .is_err()
         {

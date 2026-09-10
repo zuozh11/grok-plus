@@ -229,10 +229,7 @@ impl ScrollbackPane {
         };
 
         let display_cfg = &state.appearance().scrollback.display;
-        // When the blend is inexpressible, fall back to bg_hover: a named
-        // band on quantized RGB themes, Reset (no band, border carries the
-        // cue) on the terminal theme.
-        let hover_bg = blend_color(theme.bg_base, theme.bg_dark, 0.5).unwrap_or(theme.bg_hover);
+        let hover_bg = theme.row_hover_bg();
         let bg_style = Style::default().bg(hover_bg);
 
         // Inset the hover bg by 1 column on each side unless the appearance config opts into overlaying the border

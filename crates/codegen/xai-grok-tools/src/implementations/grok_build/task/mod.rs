@@ -28,7 +28,6 @@ use self::types::CurrentPromptIdResource;
 use self::types::*;
 use crate::types::output::ToolOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-#[allow(unused_imports)]
 use crate::types::resources::{SessionFolder, SharedResources};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use regex::Regex;
@@ -171,10 +170,6 @@ async fn resolve_background_notice_names(resources: &SharedResources) -> (String
     )
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Tool implementation
-// ───────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Default)]
 pub struct TaskTool;
 
@@ -246,10 +241,6 @@ fn log_background_spawn_after_start(
         }
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────────
-// Tests
-// ───────────────────────────────────────────────────────────────────────────
 
 impl crate::types::tool_metadata::ToolMetadata for TaskTool {
     fn kind(&self) -> ToolKind {
@@ -442,7 +433,7 @@ impl xai_tool_runtime::Tool for TaskTool {
         // Treat blank/empty/"null" resume_from as absent (models sometimes emit these).
         let resume_from = input.resume_from.and_then(|s| {
             let trimmed = s.trim();
-            is_valid_resume_id(trimmed).then(|| trimmed.to_string())
+            xai_tool_types::is_not_sentinel(trimmed).then(|| trimmed.to_string())
         });
 
         // Model overrides are soft-ignored on resume (source model is always pinned).

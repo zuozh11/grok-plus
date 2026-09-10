@@ -4,11 +4,36 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Persistent-memory implementation selected for a session.
+///
+/// The mode is resolved once with the rest of [`MemoryConfig`] and is not
+/// changed for an already-running session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// Existing summary, search, and Dream pipeline rooted at `memory/`.
+    #[default]
+    Legacy,
+    /// Isolated topic and observation pipeline rooted at `memory-v2/`.
+    V2,
+}
+
+impl MemoryMode {
+    pub fn is_legacy(self) -> bool {
+        self == Self::Legacy
+    }
+
+    pub fn is_v2(self) -> bool {
+        self == Self::V2
+    }
+}
+
 /// Raw `[memory]` settings. Absence is preserved for per-field fallback.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemorySettings {
     pub enabled: Option<bool>,
+    pub mode: Option<MemoryMode>,
     pub index: Option<MemoryIndexSettings>,
     pub embedding: Option<MemoryEmbeddingSettings>,
     pub search: Option<MemorySearchSettings>,
@@ -478,6 +503,7 @@ impl Default for PruningConfig {
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    pub mode: MemoryMode,
     pub index: MemoryIndexConfig,
     pub embedding: MemoryEmbeddingConfig,
     pub search: MemorySearchConfig,
@@ -566,6 +592,7 @@ impl MemoryConfig {
                 .default(false)
                 .resolve()
                 .value,
+            mode: memory.mode.unwrap_or(defaults.mode),
             index: MemoryIndexConfig {
                 max_chunk_chars: index
                     .and_then(|settings| settings.max_chunk_chars)
@@ -793,6 +820,30 @@ mod tests {
         assert_eq!(f.semantic_dedup_threshold, Some(1.0));
         let f: MemoryFlushConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(f.semantic_dedup_threshold, None);
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_legacy_and_parses_v2() {
+        let defaults: MemorySettings = toml::from_str("").unwrap();
+        assert_eq!(defaults.mode, None);
+
+        let v2: MemorySettings = toml::from_str("mode = \"v2\"").unwrap();
+        assert_eq!(v2.mode, Some(MemoryMode::V2));
+
+        let resolved = MemoryConfig::resolve_settings(
+            None,
+            &v2,
+            &Default::default(),
+            &Default::default(),
+            None,
+        );
+        assert_eq!(resolved.mode, MemoryMode::V2);
+        assert_eq!(MemoryConfig::default().mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn memory_mode_rejects_unknown_values() {
+        assert!(toml::from_str::<MemorySettings>("mode = \"future\"").is_err());
     }
 
     #[test]

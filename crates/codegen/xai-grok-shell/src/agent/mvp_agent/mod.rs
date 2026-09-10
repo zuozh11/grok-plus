@@ -39,7 +39,9 @@ use crate::agent::auth_method;
 use crate::agent::config::{self, Config as AgentConfig, ModelEntry, resolve_credentials};
 use crate::agent::feedback_client::FeedbackClient;
 use crate::agent::folder_trust;
-use crate::agent::models::{resolve_catalog_key, selectable_catalog_key_for_persisted};
+use crate::agent::remote_config::{
+    resolve_catalog_key, selectable_catalog_key_for_persisted,
+};
 use crate::agent::session_config;
 use xai_grok_sampling_types::{
     REASONING_EFFORT_META_KEY, ReasoningEffort, ReasoningEffortOption,
@@ -61,9 +63,9 @@ use xai_grok_sampler::SamplerConfig as SamplingConfig;
 use crate::session::persistence::PersistenceHandle;
 use crate::session::worktree::BackgroundCopyContext;
 use crate::session::{
-    ParsedPromptInfo, SessionCommand, SessionHandle, CancelOptions, CancelTrigger,
-    SessionLiveState, SessionThread, ShutdownKind, info::Info as SessionInfo,
-    spawn_session_on_thread,
+    CancelOptions, CancelTrigger, MEMORY_MODE_META_KEY, ParsedPromptInfo, SessionCommand,
+    SessionHandle, SessionLiveState, SessionThread, ShutdownKind,
+    info::Info as SessionInfo, spawn_session_on_thread,
 };
 use crate::terminal::{AcpTerminalRunner, TerminalRunner};
 use crate::tools::ToolContext;
@@ -248,7 +250,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub is_headless: bool,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
-    pub prefetch: Option<session_create_prefetch::SessionCreatePrefetch>,
+    pub prefetch: Option<crate::session::session_create_prefetch::SessionCreatePrefetch>,
 }
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
@@ -344,43 +346,8 @@ fn chat_new_session_model_state(
     state.current_model_id = acp::ModelId::new(requested);
     state
 }
-/// `session/new` / `session/load` `_meta` key carrying per-session plugin roots.
-pub(crate) const SESSION_PLUGIN_DIRS_META_KEY: &str = "pluginDirs";
-/// `initialize` response `_meta` key advertising [`SESSION_PLUGIN_DIRS_META_KEY`] support.
+/// `initialize` response `_meta` key advertising `pluginDirs` support.
 pub(crate) const SESSION_PLUGIN_DIRS_CAPABILITY_KEY: &str = "x.ai/pluginDirs";
-/// Per-session plugin roots from `session/new` / `session/load` `_meta.pluginDirs`.
-/// They load at CliOverride scope (always trusted) into this session's registry only.
-/// Paths must be absolute (the SDKs resolve before sending); anything else is warned and skipped.
-pub(crate) fn parse_session_plugin_dirs(
-    meta: Option<&acp::Meta>,
-) -> Vec<std::path::PathBuf> {
-    let Some(entries) = meta
-        .and_then(|m| m.get(SESSION_PLUGIN_DIRS_META_KEY))
-        .and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    for entry in entries {
-        let Some(raw) = entry.as_str() else {
-            tracing::warn!(?entry, "pluginDirs entry is not a string; skipping");
-            continue;
-        };
-        let path = std::path::PathBuf::from(raw);
-        if !path.is_absolute() {
-            tracing::warn!("pluginDirs entry is not absolute; skipping");
-            continue;
-        }
-        let canonical = dunce::canonicalize(&path).unwrap_or(path);
-        if !canonical.is_dir() {
-            tracing::warn!("pluginDirs entry is not a directory; skipping");
-            continue;
-        }
-        if !dirs.contains(&canonical) {
-            dirs.push(canonical);
-        }
-    }
-    dirs
-}
 /// Thin chat-kind profile shared by [`MvpAgent::load_chat_session`] and chat-kind `session/new`.
 /// Noop persistence, no MCP, no client FS / terminal / code-nav.
 /// Keeps spawn options from drifting between new and load.
@@ -445,18 +412,6 @@ fn mark_as_replay(
     if let Some(persist) = persist_data {
         obj.insert("x.ai/persist".to_string(), persist.clone());
     }
-}
-/// Resolve a session's REQUESTED auto flag from `_meta`.
-/// An explicit `autoMode` (or snake_case `auto_mode`) wins; when absent, fall back to the config default (yolo suppresses the default auto seed).
-/// Shared by the new_session / load_session parse paths (the feature gate is enforced later in `set_auto_mode`) and unit-tested directly.
-pub(crate) fn resolve_session_auto_mode(
-    meta: Option<&acp::Meta>,
-    default_auto_mode: bool,
-    session_yolo_mode: bool,
-) -> bool {
-    meta.and_then(|m| m.get("autoMode").or_else(|| m.get("auto_mode")))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default_auto_mode && !session_yolo_mode)
 }
 /// Typed `_meta` payload for `PromptResponse`.
 /// camelCase keys match the bot's `_META_TOKEN_KEY_MAP`.
@@ -642,23 +597,6 @@ fn announcements_refresh_interval() -> std::time::Duration {
     }
     std::time::Duration::from_secs(5 * 60)
 }
-/// Reason why a client is not eligible to use codebase indexing.
-/// Returned by [`MvpAgent::code_nav_eligibility`] when one of the policy gates fails.
-/// Used in `x.ai/code/status` responses and to generate clear error messages on code-nav requests from ineligible clients.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodeNavEligibility {
-    /// Client type is not web (web-only for initial rollout).
-    ClientNotWeb,
-    /// Client did not advertise `x.ai/codeNavigation.enabled`.
-    CapabilityNotAdvertised,
-    /// `codebase_indexing` feature is disabled in config (or excluded by glob).
-    DisabledByConfig,
-    /// The cwd is not inside a git repository.
-    NotGitRepo,
-    /// `sessionId` is required for code navigation but was absent or refers to an unknown / evicted session.
-    /// Per-client capability cannot be determined without a valid session context.
-    SessionRequired,
-}
 /// Interval between join-handle supervisor sweeps.
 /// A panicked/exited actor is reaped within one tick.
 /// Kept small so reaping is prompt without busy-spinning the single `LocalSet` thread.
@@ -732,7 +670,7 @@ pub struct MvpAgent {
     /// Per-session base_url is resolved at session creation time in `new_session` / `load_session`.
     pub(crate) sampling_config: RefCell<SamplingConfig>,
     pub(crate) auth_manager: Arc<AuthManager>,
-    pub(crate) models_manager: crate::agent::models::ModelsManager,
+    pub(crate) models_manager: crate::agent::remote_config::ModelsManager,
     /// grok.com chat-product catalog (`/rest/modes`) for chat sessions; distinct from `models_manager` (the build `/v1/models` catalog).
     pub(crate) chat_modes: crate::agent::chat_modes::ChatModesManager,
     /// Single-flight guard for interactive login (device poll / loopback wait).
@@ -890,7 +828,7 @@ pub struct MvpAgent {
     /// Separate dedup guard for `spawn_post_auth_settings`.
     /// An in-flight reapply then can't coalesce away a freshly authenticated identity's gate and settings resolution.
     post_auth_settings_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
-    settings_manager: settings_manager::SettingsManager,
+    settings_refresh: crate::agent::remote_config::SettingsRefresh,
     /// Last value handed out by `next_announcements_gen` (single-threaded LocalSet, so a plain `Cell` suffices).
     /// LEADER-SAFE(shared): one agent-wide push stream.
     announcements_gen: std::cell::Cell<u64>,
@@ -1097,21 +1035,6 @@ pub(crate) fn warn_on_missing_parent_session_for_validate_type(
         );
     }
 }
-/// Parse an env var as a JSON object. Returns `None` if unset or not a valid JSON object.
-pub(crate) fn parse_json_object_env(var: &str) -> Option<serde_json::Value> {
-    let val = std::env::var(var).ok()?;
-    match serde_json::from_str::<serde_json::Value>(&val) {
-        Ok(v) if v.is_object() => Some(v),
-        Ok(_) => {
-            tracing::warn!("{var} is not a JSON object, ignoring");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("{var} is invalid JSON: {e}");
-            None
-        }
-    }
-}
 #[derive(Debug, Default, serde::Deserialize)]
 struct AuthRequestMeta {
     #[serde(default)]
@@ -1306,6 +1229,7 @@ impl Drop for SessionLoadGuard<'_> {
         self.agent.session_registry.settle_attach(&self.session_id, &self.rx);
     }
 }
+mod agent_runtime;
 mod code_nav;
 mod folder_trust_prompt;
 mod heap_profile;
@@ -1316,146 +1240,13 @@ mod agent_ops;
 mod acp_agent;
 pub(crate) mod reasoning_effort;
 mod sampler_prewarm;
-pub(crate) mod session_create_prefetch;
 mod session_setup;
 mod subagent_spawn;
+pub(crate) mod test_hooks;
 mod turn_end;
 use session_registry::SessionRegistry;
 pub(crate) use session_lifecycle::RegistrySnapshot;
 pub(super) use super::ext_parsers;
-mod settings_manager {
-    use std::cell::RefCell;
-    use std::future::Future;
-    use tokio::sync::watch;
-    use xai_grok_login::GrokAuth;
-    use crate::remote::SettingsFetch;
-    #[derive(Clone, PartialEq, Eq)]
-    struct CredentialIdentity {
-        user_id: String,
-        key: String,
-    }
-    impl From<&GrokAuth> for CredentialIdentity {
-        fn from(auth: &GrokAuth) -> Self {
-            Self {
-                user_id: auth.user_id.clone(),
-                key: auth.key.clone(),
-            }
-        }
-    }
-    #[derive(Default)]
-    struct State {
-        epoch: u64,
-        identity: Option<CredentialIdentity>,
-        in_flight: Option<watch::Receiver<Option<SettingsFetch>>>,
-    }
-    impl State {
-        fn reset_to(&mut self, identity: CredentialIdentity) {
-            self.epoch += 1;
-            self.identity = Some(identity);
-            self.in_flight = None;
-        }
-    }
-    #[derive(Default)]
-    pub(super) struct SettingsManager {
-        state: RefCell<State>,
-    }
-    enum Plan {
-        Join(watch::Receiver<Option<SettingsFetch>>),
-        Lead(watch::Sender<Option<SettingsFetch>>),
-    }
-    impl SettingsManager {
-        const MAX_DROPPED_LEADER_REATTEMPTS: u32 = 3;
-        pub(super) async fn fetch<F, Fut>(
-            &self,
-            auth: &GrokAuth,
-            leader: F,
-        ) -> Option<SettingsFetch>
-        where
-            F: FnOnce() -> Fut,
-            Fut: Future<Output = SettingsFetch>,
-        {
-            let identity = CredentialIdentity::from(auth);
-            let mut leader = Some(leader);
-            let mut dropped_leader_reattempts = 0u32;
-            loop {
-                let (plan, my_epoch) = {
-                    let mut st = self.state.borrow_mut();
-                    if st.identity.as_ref() != Some(&identity) {
-                        st.reset_to(identity.clone());
-                    }
-                    let my_epoch = st.epoch;
-                    let plan = if let Some(rx) = st.in_flight.as_ref() {
-                        Plan::Join(rx.clone())
-                    } else {
-                        let (tx, rx) = watch::channel(None);
-                        st.in_flight = Some(rx);
-                        Plan::Lead(tx)
-                    };
-                    (plan, my_epoch)
-                };
-                match plan {
-                    Plan::Join(mut rx) => {
-                        let published = loop {
-                            if let Some(outcome) = rx.borrow_and_update().clone() {
-                                break Some(outcome);
-                            }
-                            if rx.changed().await.is_err() {
-                                break None;
-                            }
-                        };
-                        match published {
-                            Some(outcome) => return Some(outcome),
-                            None => {
-                                dropped_leader_reattempts += 1;
-                                if dropped_leader_reattempts
-                                    > Self::MAX_DROPPED_LEADER_REATTEMPTS
-                                {
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-                    Plan::Lead(tx) => {
-                        let mut guard = LeaderGuard {
-                            manager: self,
-                            epoch: my_epoch,
-                            published: false,
-                        };
-                        let run = leader
-                            .take()
-                            .expect("leader closure consumed at most once");
-                        let outcome = run().await;
-                        {
-                            let mut st = self.state.borrow_mut();
-                            if st.epoch == my_epoch {
-                                st.in_flight = None;
-                            }
-                        }
-                        guard.published = true;
-                        let _ = tx.send(Some(outcome.clone()));
-                        return Some(outcome);
-                    }
-                }
-            }
-        }
-    }
-    struct LeaderGuard<'a> {
-        manager: &'a SettingsManager,
-        epoch: u64,
-        published: bool,
-    }
-    impl Drop for LeaderGuard<'_> {
-        fn drop(&mut self) {
-            if self.published {
-                return;
-            }
-            let mut st = self.manager.state.borrow_mut();
-            if st.epoch == self.epoch {
-                st.in_flight = None;
-            }
-        }
-    }
-}
 /// Named `auth.lifecycle` (not `auth`) to avoid colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span.
 fn emit_login_span(
     success: bool,
@@ -1549,13 +1340,10 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         updates_file_path: &Option<PathBuf>,
     ) -> Vec<tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<()>>> {
-        let orphaned = Self::find_orphaned_background_tasks(updates_file_path);
-        if orphaned.is_empty() {
-            return Vec::new();
-        }
         if self.is_resident(session_id) {
             return Vec::new();
         }
+        let orphaned = Self::find_orphaned_background_tasks(updates_file_path);
         let mut completions = Vec::with_capacity(orphaned.len());
         for task in &orphaned {
             let snapshot = xai_grok_tools::types::TaskSnapshot {
@@ -1604,10 +1392,10 @@ impl MvpAgent {
                     );
             }
         }
-        if !completions.is_empty() {
+        if !orphaned.is_empty() {
             tracing::info!(
                 session_id = %session_id.0,
-                stale_count = completions.len(),
+                stale_count = orphaned.len(),
                 "Emitted task_completed for stale background tasks"
             );
         }
@@ -2523,7 +2311,7 @@ impl Drop for TierRecheckInFlightGuard {
 /// Then refreshes the model catalog. Gate lift already happened; this only recovers the tier-targeted catalog. The flag is released by [`PostUnblockJwtRetryInFlightGuard`] (Drop), not only on the happy path after `execute_with_backoff`.
 fn spawn_post_unblock_jwt_and_catalog_retry(
     auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
-    models_manager: crate::agent::models::ModelsManager,
+    models_manager: crate::agent::remote_config::ModelsManager,
     in_flight: Arc<std::sync::atomic::AtomicBool>,
     user_id: String,
     new_tier: String,

@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_tools::implementations::grok_build::task::coordinator::ActiveMessageAdmission;
-use xai_grok_tools::implementations::grok_build::task::types::{
-    ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
-};
+use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery;
 use xai_message_delivery_core::{
     AgentSource, DeliveryEnvelope, DeliveryIdentity, HumanSource, Operation, OperationSet,
     authorize_operation,
@@ -95,32 +93,6 @@ pub(crate) fn agent_delivery_identity(message_id: String) -> AgentDeliveryIdenti
     )
 }
 
-pub(crate) fn delivery_operation(operation: ActiveAgentMessageOperation) -> Operation {
-    match operation {
-        ActiveAgentMessageOperation::Queue => Operation::Queue,
-        ActiveAgentMessageOperation::Steer => Operation::Steer,
-    }
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum ActiveMessagePrincipal {
-    Agent,
-    Human,
-}
-
-pub(crate) fn delivery_principal(
-    source: xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageSource,
-) -> ActiveMessagePrincipal {
-    match source {
-        xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageSource::Agent => {
-            ActiveMessagePrincipal::Agent
-        }
-        xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageSource::Human => {
-            ActiveMessagePrincipal::Human
-        }
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct MessageDeliveryHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
@@ -186,7 +158,7 @@ impl MessageDeliveryHandle {
         {
             return ActiveMessageAdmission::Rejected;
         }
-        if operation != delivery_operation(delivery.operation())
+        if operation != Operation::from(delivery.operation())
             || authorize_operation(OperationSet::QUEUE_AND_STEER, operation).is_err()
         {
             return ActiveMessageAdmission::Unsupported;
@@ -196,7 +168,6 @@ impl MessageDeliveryHandle {
         if self
             .cmd_tx
             .send(SessionCommand::ParentAgentMessage {
-                principal: delivery_principal(delivery.source()),
                 delivery,
                 receipt_sink,
                 parent_telemetry_ctx,

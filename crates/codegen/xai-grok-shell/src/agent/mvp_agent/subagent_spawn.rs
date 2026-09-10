@@ -292,6 +292,11 @@ impl MvpAgent {
             terminal,
             session_env,
             memory_config: self.memory_config.clone(),
+            memory_mode: self
+                .memory_config
+                .as_ref()
+                .map(|config| config.mode)
+                .unwrap_or_else(|| self.cfg.borrow().memory.mode.unwrap_or_default()),
             web_search_sampling_config: self.prepare_web_search_sampling_config(),
             web_fetch_config: self.prepare_web_fetch_config(),
             image_gen_config: self.prepare_image_gen_config(),

@@ -205,6 +205,8 @@ pub struct SettingsModalState {
     /// When true, Esc/Enter from `PickingEnum` close the modal instead of returning to Browse.
     /// Set by deep-link open (`OpenSettingsFocus` / `/privacy`); cleared on leave from the picker.
     pub close_on_picker_exit: bool,
+    /// Last left-click on a picker radio: `(choice index, when)`.
+    pub(super) picker_last_click: Option<(usize, std::time::Instant)>,
 }
 
 impl SettingsModalState {
@@ -244,6 +246,7 @@ impl SettingsModalState {
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
             close_on_picker_exit: false,
+            picker_last_click: None,
         }
     }
 
@@ -502,6 +505,7 @@ impl SettingsModalState {
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
         self.close_on_picker_exit = false;
+        self.picker_last_click = None;
     }
 
     pub fn focus_filter(&mut self) {

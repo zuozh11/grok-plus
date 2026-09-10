@@ -64,7 +64,7 @@ fn new_filtered_debouncer<F: notify_debouncer_mini::DebounceEventHandler>(
 pub enum ConfigChangeEvent {
     AuthChanged,
     GlobalConfigChanged,
-    /// `~/.grok/models_cache.json` changed — the on-disk `/v1/models` catalog cache was rewritten, possibly by **another** grok process sharing the same `~/.grok` (the writer may also be this process; the [`ModelsManager`](crate::agent::models::ModelsManager) dedupes by content before applying).
+    /// `~/.grok/models_cache.json` changed — the on-disk `/v1/models` catalog cache was rewritten, possibly by **another** grok process sharing the same `~/.grok` (the writer may also be this process; the [`ModelsManager`](crate::agent::remote_config::ModelsManager) dedupes by content before applying).
     ModelsCacheChanged,
     ProjectConfigChanged {
         path: PathBuf,

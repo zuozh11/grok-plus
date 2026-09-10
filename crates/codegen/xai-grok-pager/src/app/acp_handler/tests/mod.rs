@@ -1316,39 +1316,6 @@ pub(super) fn xai_hook_execution_notif_with_runs(
         serde_json::value::to_raw_value(&payload).unwrap().into(),
     )
 }
-pub(super) fn xai_hook_execution_notif(
-    session_id: &str,
-    event_name: &str,
-    is_replay: bool,
-) -> acp::ExtNotification {
-    xai_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
-}
-pub(super) fn count_lifecycle_blocks(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                    sb.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-                )
-        })
-        .count()
-}
-/// Stop-hook groups on the last turn-terminal session-event marker, if any.
-pub(super) fn last_marker_stop_hook_groups(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.event.is_turn_terminal() => {
-                Some(b.stop_hooks.len())
-            }
-            _ => None,
-        })
-}
 /// Work-only status lines ("N … still running") pushed as system rows.
 /// Never pushed in production; tests assert emptiness.
 pub(super) fn work_status_lines(sb: &ScrollbackState) -> Vec<String> {
@@ -2406,6 +2373,7 @@ mod queue_and_adoption;
 mod plan_mode;
 mod reconnect;
 mod turn_completion;
+mod hooks;
 mod interjection;
 mod session_routing;
 mod plugins;

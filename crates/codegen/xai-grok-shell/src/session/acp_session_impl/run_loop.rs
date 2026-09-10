@@ -104,7 +104,7 @@ pub(super) async fn fire_session_end_hooks(
         )
         .await;
         session
-            .send_hook_execution("session_end", None, None, &results)
+            .send_hook_execution(&HookBatch::from_envelope(&envelope), &results)
             .await;
     }
     let _stop = session_end::timed_child(timer, Phase::HooksStop, span.span());
@@ -259,12 +259,72 @@ async fn emit_session_end_timings(timer: &SharedSessionEndTimer, is_subagent: bo
 struct StartupTasks {
     _mcp_init_prompt_promote: crate::util::AbortOnDrop,
     _context_snapshot: Option<crate::util::AbortOnDrop>,
+    mcp_startup: StartupTaskSet,
+}
+/// Startup tasks handed over by `&self` actor methods, each holding a strong `Arc` to the actor. Owned by the run
+/// loop, so no task keeps the session alive past it.
+pub(super) struct StartupTaskSet(std::rc::Rc<std::cell::RefCell<tokio::task::JoinSet<()>>>);
+impl StartupTaskSet {
+    pub(super) fn install(actor: &SessionActor) -> Self {
+        let set = Self(std::rc::Rc::default());
+        actor
+            .startup_tasks
+            .0
+            .set(std::rc::Rc::downgrade(&set.0))
+            .unwrap_or_else(|_| unreachable!("one run loop installs the startup set once"));
+        set
+    }
+}
+/// The actor's side of a [`StartupTaskSet`]: empty until the run loop installs one.
+#[derive(Default)]
+pub(crate) struct StartupTaskHandle(
+    std::cell::OnceCell<std::rc::Weak<std::cell::RefCell<tokio::task::JoinSet<()>>>>,
+);
+/// Before any run loop the future is handed back to run inline; after the run loop has ended it is dropped.
+pub(super) enum StartupHandoff<F> {
+    Spawned,
+    NoRunLoopYet(F),
+    RunLoopEnded,
+}
+impl StartupTaskHandle {
+    pub(super) fn spawn_local<F: Future<Output = ()> + 'static>(
+        &self,
+        fut: F,
+    ) -> StartupHandoff<F> {
+        let Some(set) = self.0.get() else {
+            return StartupHandoff::NoRunLoopYet(fut);
+        };
+        let Some(set) = set.upgrade() else {
+            return StartupHandoff::RunLoopEnded;
+        };
+        spawn_after_reaping(&mut set.borrow_mut(), fut);
+        StartupHandoff::Spawned
+    }
+}
+impl StartupTaskSet {
+    pub(super) fn spawn_local<F: Future<Output = ()> + 'static>(&self, fut: F) {
+        spawn_after_reaping(&mut self.0.borrow_mut(), fut);
+    }
+}
+pub(super) fn spawn_after_reaping<F: Future<Output = ()> + 'static>(
+    tasks: &mut tokio::task::JoinSet<()>,
+    fut: F,
+) {
+    while let Some(finished) = tasks.try_join_next() {
+        if let Err(e) = finished
+            && e.is_panic()
+        {
+            tracing::warn!(error = %e, "MCP startup task panicked");
+        }
+    }
+    tasks.spawn_local(fut);
 }
 impl StartupTasks {
     fn spawn(
         session: &Arc<SessionActor>,
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) -> Self {
+        let mcp_startup = StartupTaskSet::install(session);
         let session_for_mcp = session.clone();
         let mcp_init_prompt_promote =
             crate::util::AbortOnDrop(tokio::task::spawn_local(async move {
@@ -287,6 +347,7 @@ impl StartupTasks {
         Self {
             _mcp_init_prompt_promote: mcp_init_prompt_promote,
             _context_snapshot: context_snapshot,
+            mcp_startup,
         }
     }
 }
@@ -439,7 +500,7 @@ pub(super) async fn run_session(
             .await;
         });
     }
-    let _startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
+    let startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
@@ -454,7 +515,7 @@ pub(super) async fn run_session(
     tokio::pin!(dream_check_sleep);
     let mut dream_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut deferred_start = DeferredStart::new();
-    if !session.startup_hints.is_subagent && session.memory.is_enabled() {
+    if !session.startup_hints.is_subagent && session.memory.uses_legacy_pipeline() {
         dream_task = Some(spawn_dream_check(&session));
     }
     loop {
@@ -462,7 +523,7 @@ pub(super) async fn run_session(
                 biased;
                 // Idle flush timer fired: run background flush
                 _ = &mut idle_flush_sleep, if session.idle_flush_timeout.is_some()
-                    && session.memory.is_enabled()
+                    && session.memory.uses_legacy_pipeline()
                     && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed) => {
                     // Skip if no new messages since last idle flush
                     let current_len = session.chat_state_handle.get_conversation_len().await;
@@ -493,7 +554,7 @@ pub(super) async fn run_session(
                 }
                 // Dream check timer: periodically run dream consolidation
                 _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
-                    && session.memory.is_enabled()
+                    && session.memory.uses_legacy_pipeline()
                     && !session.startup_hints.is_subagent => {
                     tracing::debug!(target: xai_grok_telemetry::memory_log::TARGET,
                         "MEMORY_DREAM_CHECK: timer fired");
@@ -753,7 +814,6 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::ParentAgentMessage {
-                            principal,
                             delivery,
                             receipt_sink,
                             parent_telemetry_ctx,
@@ -761,7 +821,6 @@ pub(super) async fn run_session(
                         } => {
                             session
                                 .admit_parent_agent_message(
-                                    principal,
                                     delivery,
                                     receipt_sink,
                                     parent_telemetry_ctx,
@@ -863,10 +922,17 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::ListTasks { respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
-                                .list_tasks()
-                                .await;
+                            let result = session.tool_bridge_handle().list_tasks().await;
                             let _ = respond_to.send(result);
+                        }
+                        SessionCommand::EmitBackgroundTasksSnapshot {
+                            respond_to,
+                            pending,
+                        } => {
+                            session.emit_background_tasks_snapshot(pending).await;
+                            if let Some(respond_to) = respond_to {
+                                let _ = respond_to.send(());
+                            }
                         }
                         SessionCommand::GetHooksList { respond_to } => {
                             let hooks = crate::extensions::hooks::current_hook_infos(
@@ -1381,14 +1447,14 @@ pub(super) async fn run_session(
                             // Capture the dispatcher's event sender alongside the diff
                             // `McpClientEvent::ConfigDiff` can then fan out right after the in-memory swap
                             // The emit happens without holding the `mcp_state` lock
-                            let (diff, dispatch_event_tx) = {
+                            let (change, dispatch_event_tx) = {
                                 let mut mcp_state = session.mcp_state.lock().await;
-                                let diff = mcp_state.update_configs_diff(mcp_servers);
+                                let change = session.update_mcp_configs(&mut mcp_state, mcp_servers);
                                 let tx = mcp_state.client_event_tx();
-                                (diff, tx)
+                                (change, tx)
                             };
 
-                            let Some(diff) = diff else {
+                            let Some(change) = change else {
                                 tracing::debug!(
                                     "MCP configs unchanged for session '{}', skipping re-initialization",
                                     session.session_info.id.0
@@ -1397,41 +1463,12 @@ pub(super) async fn run_session(
                                 continue;
                             };
 
-                            // Emit one `ConfigDiff` so the `StatusDispatcher` fans out per-server `mcp/server_status`.
-                            // The reason is `ConfigAdded` or `ConfigRemoved`.
-                            // Best-effort: a dropped dispatcher means `mcp.liveness_watchers` is off or the session has shut down.
-                            if (!diff.added.is_empty() || !diff.removed.is_empty())
-                                && let Some(tx) = &dispatch_event_tx
-                            {
-                                let _ = tx.send(
-                                    xai_grok_mcp::servers::McpClientEvent::ConfigDiff {
-                                        added: diff.added.clone(),
-                                        removed: diff.removed.clone(),
-                                    },
-                                );
-                            }
-
-                            for name in &diff.removed {
-                                let prefix = format!(
-                                    "{}{}",
-                                    name,
-                                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                                );
-                                let removed_count = session
-                                    .agent
-                                    .borrow()
-                                    .tool_bridge()
-                                    .unregister_tools_by_prefix(&prefix);
-                                tracing::info!(
-                                    server = name.as_str(),
-                                    tools_removed = removed_count,
-                                    "Unregistered tools for removed MCP server"
-                                );
-                            }
-
+                            session.apply_mcp_config_diff(&change.diff, dispatch_event_tx);
                             let session_for_mcp = session.clone();
-                            tokio::task::spawn_local(async move {
-                                session_for_mcp.ensure_mcp_tools_initialized().await;
+                            startup_tasks.mcp_startup.spawn_local(async move {
+                                session_for_mcp
+                                    .start_mcp_servers_after_config_change(change)
+                                    .await;
                                 let _ = respond_to.send(Ok(()));
                             });
                         }
@@ -1470,52 +1507,22 @@ pub(super) async fn run_session(
                                 configs.retain(|c| crate::session::mcp_servers::mcp_server_name(c) != server_name);
                             }
 
-                            let diff = mcp_state.update_configs_diff(configs);
+                            let change = session.update_mcp_configs(&mut mcp_state, configs);
                             // Snapshot the dispatcher sender BEFORE dropping the lock so the emit below survives any later mutation
                             let dispatch_event_tx = mcp_state.client_event_tx();
                             drop(mcp_state);
 
-                            let Some(diff) = diff else {
+                            let Some(change) = change else {
                                 let _ = respond_to.send(Ok(()));
                                 continue;
                             };
 
-                            // ToggleMcpServer mirrors UpdateMcpServers: fan out per-server status via the dispatcher
-                            // The reason codes on `mcp/server_status` are `ConfigAdded` and `ConfigRemoved`
-                            if (!diff.added.is_empty() || !diff.removed.is_empty())
-                                && let Some(tx) = &dispatch_event_tx
-                            {
-                                let _ = tx.send(
-                                    xai_grok_mcp::servers::McpClientEvent::ConfigDiff {
-                                        added: diff.added.clone(),
-                                        removed: diff.removed.clone(),
-                                    },
-                                );
-                            }
-
-                            for name in &diff.removed {
-                                let prefix = format!(
-                                    "{}{}",
-                                    name,
-                                    crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER
-                                );
-                                let removed_count = session
-                                    .agent
-                                    .borrow()
-                                    .tool_bridge()
-                                    .unregister_tools_by_prefix(&prefix);
-                                tracing::info!(
-                                    server = name.as_str(),
-                                    tools_removed = removed_count,
-                                    "Unregistered tools for toggled MCP server"
-                                );
-                            }
-
+                            session.apply_mcp_config_diff(&change.diff, dispatch_event_tx);
                             let session_for_mcp = session.clone();
                             let sname = server_name.clone();
                             let session_cwd = session.session_info.cwd.clone();
+                            // The preference outlives the session, so its write does not ride on startup.
                             tokio::task::spawn_local(async move {
-                                session_for_mcp.ensure_mcp_tools_initialized().await;
                                 if let Err(e) = crate::util::config::save_mcp_server_enabled_in(
                                     &sname,
                                     enabled,
@@ -1529,6 +1536,11 @@ pub(super) async fn run_session(
                                         "Failed to persist server enabled state to config"
                                     );
                                 }
+                            });
+                            startup_tasks.mcp_startup.spawn_local(async move {
+                                session_for_mcp
+                                    .start_mcp_servers_after_config_change(change)
+                                    .await;
                                 let _ = respond_to.send(Ok(()));
                             });
                         }
@@ -1903,9 +1915,7 @@ pub(super) async fn run_session(
                                                 return;
                                             }
                                             s.send_hook_execution(
-                                                "session_start",
-                                                None,
-                                                None,
+                                                &HookBatch::from_envelope(&envelope),
                                                 &results,
                                             )
                                             .await;

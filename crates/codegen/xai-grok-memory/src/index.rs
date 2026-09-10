@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Once;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use xai_sqlite_journal::JournalMode;
 
 use super::chunker::{chunk_hash, chunk_markdown};
@@ -111,6 +111,47 @@ impl MemoryIndex {
         )
     }
 
+    /// Open an index for lexical-only maintenance without changing the vector
+    /// dimension already recorded by the embedding backend.
+    pub(crate) fn open_or_create_preserving_dimensions(
+        db_path: &Path,
+        storage: MemoryStorage,
+        config: MemoryIndexConfig,
+        fallback_dimensions: usize,
+    ) -> Result<Self, rusqlite::Error> {
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let journal_mode = JournalMode::for_db_path(db_path);
+        let db = journal_mode.open(db_path)?;
+        let has_meta = db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let stored_dimensions = if has_meta {
+            db.query_row(
+                schema::GET_META_SQL,
+                params!["embedding_dimensions"],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let dimensions = match stored_dimensions {
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|dimensions| *dimensions > 0)
+                .ok_or(rusqlite::Error::InvalidQuery)?,
+            None => fallback_dimensions,
+        };
+        Self::initialize(db, storage, config, dimensions)
+    }
+
     /// Open with an explicit journal mode. Tests use it to exercise the network-filesystem decision on a local disk.
     fn open_or_create_with_journal_mode(
         db_path: &Path,
@@ -121,7 +162,15 @@ impl MemoryIndex {
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
+        Self::initialize(db, storage, config, dimensions)
+    }
 
+    fn initialize(
+        db: rusqlite::Connection,
+        storage: MemoryStorage,
+        config: MemoryIndexConfig,
+        dimensions: usize,
+    ) -> Result<Self, rusqlite::Error> {
         // Check if sqlite-vec loaded (graceful fallback if not)
         let vec_available =
             match db.query_row("SELECT vec_version()", [], |r| r.get::<_, String>(0)) {

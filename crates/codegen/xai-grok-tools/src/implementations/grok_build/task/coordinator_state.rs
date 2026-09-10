@@ -88,14 +88,20 @@ pub struct StartedChild<C> {
     pub control: C,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WakeOrigin {
+    pub agent_id: String,
+    pub source: super::types::ActiveAgentMessageSource,
+    pub message_id: String,
+}
+
 /// Input to one runtime-specific child run.
 pub struct ChildRunRequest<C> {
     pub request: SubagentRequest,
     pub cancellation: CancellationToken,
     pub reporter: ChildReporter<C>,
-    pub wake_agent_id: Option<String>,
-    pub wake_message_source: Option<super::types::ActiveAgentMessageSource>,
-    pub wake_message_id: Option<String>,
+    pub attempt_id: xai_message_delivery_core::AttemptId,
+    pub wake_origin: Option<WakeOrigin>,
     /// Time parked in the admission queue; `None` if admitted immediately.
     pub queued_for: Option<std::time::Duration>,
     /// The session's running non-workflow children when this spawn started,
@@ -719,12 +725,10 @@ pub(super) fn background_at_deadline(
         // Interim handoff, not a completion: keep `success: false` (default)
         // so `SubagentResult::status()` consumers cannot record a completed
         // status for a still-running child. Callers branch on `backgrounded`.
-        let _ = respond_to.send(SubagentResult {
-            backgrounded: true,
-            subagent_id: child.id().to_owned(),
-            child_session_id: child.child_session_id().to_owned(),
-            ..Default::default()
-        });
+        let _ = respond_to.send(SubagentResult::backgrounded(
+            child.id(),
+            child.child_session_id(),
+        ));
     }
     child.mark_backgrounded();
 }

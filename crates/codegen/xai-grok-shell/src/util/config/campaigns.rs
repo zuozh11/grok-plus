@@ -286,7 +286,7 @@ struct CampaignFieldValue {
 }
 
 /// A config field a campaign may temporarily override until the user sets it. `apply_campaign_fields` drives every [`CAMPAIGN_FIELDS`] entry, so the resolve pass is one row here.
-/// A field still needs its runtime state and a `persist_*` writer through [`persist_user_choice`]. It also needs any field-specific reaction (e.g. the model catalog-miss/live-session handling in `agent::models`).
+/// A field still needs its runtime state and a `persist_*` writer through [`persist_user_choice`]. It also needs any field-specific reaction (e.g. the model catalog-miss/live-session handling in `agent::remote_config`).
 struct CampaignField {
     /// Path into the effective config; also the dismiss key shared with the writer.
     path: PatchPath,

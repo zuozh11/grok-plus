@@ -1696,6 +1696,92 @@ mod tests {
     }
     #[serial_test::serial(GROK_HOME)]
     #[tokio::test]
+    async fn continue_skips_empty_worktree_stamped_husk() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let real_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let husk_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            real_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "real work",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            husk_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["grok", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, real_id)
+            }
+            other => panic!("expected Resume of the prior session, got {other:?}"),
+        }
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
+    async fn continue_keeps_empty_worktree_fork() {
+        let mut fx = crate::test_util::GrokHomeFixture::new();
+        let cwd = fx.cwd_str();
+        let older_id = "aaaaaaaa-1111-2222-3333-444444444444";
+        let fork_id = "bbbbbbbb-1111-2222-3333-444444444444";
+        fx.write_summary(
+            &cwd,
+            older_id,
+            serde_json::json!({
+                "updated_at": "2026-07-01T00:00:00Z",
+                "generated_title": "older",
+                "num_messages": 3,
+            }),
+        );
+        fx.write_summary(
+            &cwd,
+            fork_id,
+            serde_json::json!({
+                "updated_at": "2026-07-02T00:00:00Z",
+                "session_kind": "worktree",
+                "worktree_label": "fix-bug",
+                "parent_session_id": older_id,
+                "forked_at": "2026-07-02T00:00:00Z",
+                "num_messages": 0,
+                "session_summary": "",
+            }),
+        );
+        let args = parse(&["grok", "-c"]);
+        let result = materialize_startup_for_cwd(
+            MaterializeCtx::from_pager_args(&args),
+            args.session_startup_intent().unwrap(),
+            &cwd,
+        )
+        .await
+        .unwrap();
+        match result {
+            MaterializedStartup::Resume { session_id, .. } => {
+                assert_eq!(session_id, fork_id)
+            }
+            other => panic!("expected Resume of the empty worktree fork, got {other:?}"),
+        }
+    }
+    #[serial_test::serial(GROK_HOME)]
+    #[tokio::test]
     async fn most_recent_fork_selection_follows_surface() {
         let mut fx = crate::test_util::GrokHomeFixture::new();
         let cwd = fx.cwd_str();
@@ -1987,7 +2073,7 @@ mod tests {
     #[tokio::test]
     async fn remote_miss_worktree_without_restore_code_suppresses_snapshot() {
         let _fx = crate::test_util::GrokHomeFixture::new();
-        let id = "no such remote target";
+        let id = "99999999-9999-4999-8999-999999999998";
         let out = materialize_startup_for_cwd(
             remote_miss_ctx(false, true),
             SessionStartupIntent::Resume {
@@ -2002,10 +2088,15 @@ mod tests {
             MaterializedStartup::Resume {
                 session_id,
                 suppress_code_restore,
+                deferred_local_miss,
                 ..
             } => {
                 assert_eq!(session_id, id);
                 assert!(suppress_code_restore);
+                assert!(
+                    !deferred_local_miss,
+                    "uuid miss under worktree is not a title miss"
+                );
             }
             other => panic!("expected Resume, got {other:?}"),
         }

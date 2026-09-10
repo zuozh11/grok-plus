@@ -118,9 +118,7 @@ pub(crate) async fn submit_feedback_workflow(
         author_identity,
     } = opts;
 
-    if let Some(mut user_meta) =
-        crate::agent::mvp_agent::parse_json_object_env("GROK_USER_METADATA")
-    {
+    if let Some(mut user_meta) = crate::util::parse_json_object_env("GROK_USER_METADATA") {
         // `structured_feedback` is reserved for the client's typed envelope. The shallow merge
         // is later-wins, so an env copy would silently replace the client's enums (or invent
         // the key on reports that carry none); every other env key keeps later-wins.

@@ -1463,7 +1463,7 @@ fn peek_esc_clears_draft_then_unselects() {
     let _ = state.handle_key(&esc, &reg);
     assert!(state.peek.is_none());
     assert!(state.selected.is_none());
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
 }
 
 /// Ctrl-modified chords are never TYPED into the reply: non-bound editing chords (Ctrl+A →
@@ -2206,7 +2206,7 @@ fn esc_with_selection_deselects() {
         "Esc must clear `selected` so the next dispatch reaches the new-session path",
     );
     assert!(
-        state.new_agent_button_focused,
+        state.new_agent_button_focused(),
         "Esc-deselect must focus the `+ New Agent` button as the new cursor target",
     );
 }
@@ -2221,7 +2221,7 @@ fn enter_on_focused_button_with_empty_prompt_emits_create_with_detail() {
     // Fresh state defaults to button-focused; pin that
     // precondition so a future regression doesn't quietly
     // flip the default away from the button.
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
     let reg = crate::actions::ActionRegistry::defaults();
     let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     let outcome = state.handle_key(&key, &reg);
@@ -2353,7 +2353,7 @@ fn ctrl_s_on_row_selected_with_text_emits_dispatch_with_attach() {
 fn ctrl_s_on_focused_button_with_empty_prompt_emits_create_with_detail() {
     use crate::app::actions::Action;
     let mut state = DashboardState::new();
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
     let reg = crate::actions::ActionRegistry::defaults();
     let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
     let outcome = state.handle_key(&key, &reg);
@@ -2385,7 +2385,7 @@ fn esc_cascade_blurs_then_deselects_then_exits() {
     let second = state.handle_key(&key, &reg);
     assert!(matches!(second, InputOutcome::Changed));
     assert!(state.selected.is_none());
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
     // 3: exit.
     let third = state.handle_key(&key, &reg);
     assert!(
@@ -2823,7 +2823,7 @@ fn list_focus_enter_opens_and_esc_backs_out() {
         "Esc stays on the list; Tab / i return focus to the input"
     );
     assert!(state.selected.is_none(), "Esc backs out of the selection");
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
 }
 
 /// Regression for the. EscEsc-blur draft-loss path: with the list focused. (e.g. after. EscEsc unfocuses
@@ -2836,7 +2836,7 @@ fn list_focus_enter_on_button_sends_draft_else_creates() {
 
     // Draft present → dispatch it (no loss), staying on the dashboard.
     let mut state = DashboardState::new();
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
     state.dispatch.set_text("fix the bug");
     state.list_focused = true; // e.g. after an Esc blur
     match state.handle_key(&key, &reg) {
@@ -4302,7 +4302,7 @@ fn idle_overflow_esc_focuses_new_agent_button() {
     state.focus_idle_overflow();
     state.list_focused = true;
     let _ = state.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &reg);
-    assert!(state.new_agent_button_focused, "Esc focuses the button");
+    assert!(state.new_agent_button_focused(), "Esc focuses the button");
     assert!(
         !state.selected_idle_overflow,
         "Esc clears the overflow cursor"
@@ -4343,7 +4343,7 @@ fn reanchor_clears_stale_idle_overflow_cursor() {
     // No rows at all → no overflow focusable exists.
     state.reanchor_selection(&[]);
     assert!(
-        state.new_agent_button_focused,
+        state.new_agent_button_focused(),
         "a stranded overflow cursor must fall back to the button",
     );
     assert!(!state.selected_idle_overflow);
@@ -4360,7 +4360,7 @@ fn section_esc_focuses_new_agent_button() {
     state.list_focused = true;
     let _ = state.handle_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &reg);
     assert!(
-        state.new_agent_button_focused,
+        state.new_agent_button_focused(),
         "Esc on a section must focus `+ New Agent`",
     );
     assert!(
@@ -4429,7 +4429,7 @@ fn cursor_targets_are_mutually_exclusive() {
     state.focus_section(SectionKey::Pinned);
     assert_eq!(state.selected_section, Some(SectionKey::Pinned));
     assert!(state.selected.is_none());
-    assert!(!state.new_agent_button_focused);
+    assert!(!state.new_agent_button_focused());
 
     state.focus_row(DashboardRowId::TopLevel(crate::app::agent::AgentId(0)));
     assert!(
@@ -5028,7 +5028,7 @@ fn reanchor_moves_stale_section_cursor_to_button() {
         "stale section cursor must be cleared",
     );
     assert!(
-        state.new_agent_button_focused,
+        state.new_agent_button_focused(),
         "cursor must move to the `+ New Agent` button",
     );
 }
@@ -5047,7 +5047,7 @@ fn reanchor_moves_section_cursor_when_state_filter_hides_headers() {
         state.selected_section.is_none(),
         "headers are suppressed under a state filter — the section cursor must clear",
     );
-    assert!(state.new_agent_button_focused);
+    assert!(state.new_agent_button_focused());
 }
 
 /// A section cursor whose header is still on screen is untouched.
@@ -5062,7 +5062,7 @@ fn reanchor_keeps_live_section_cursor() {
         Some(SectionKey::State(RowState::Working)),
         "a live section cursor must survive reanchoring",
     );
-    assert!(!state.new_agent_button_focused);
+    assert!(!state.new_agent_button_focused());
 }
 
 /// A selected row that state churn migrated INTO a collapsed section (still present in `rows`, but
@@ -5086,7 +5086,7 @@ fn reanchor_moves_collapse_hidden_row_cursor_to_its_header() {
         Some(SectionKey::State(RowState::Working)),
         "the cursor must land on the header that hides the row",
     );
-    assert!(!state.new_agent_button_focused);
+    assert!(!state.new_agent_button_focused());
 }
 
 /// Same churn scenario for the Pinned block: a selected pinned row
@@ -6046,7 +6046,7 @@ fn refresh_repair_falls_back_to_new_agent_when_only_row_disappears() {
     dashboard.reconcile_visible_rows(&[Focusable::Row(removed)], &[], &mut Default::default());
 
     assert!(dashboard.selected.is_none());
-    assert!(dashboard.new_agent_button_focused);
+    assert!(dashboard.new_agent_button_focused());
 }
 
 fn workspace_view(

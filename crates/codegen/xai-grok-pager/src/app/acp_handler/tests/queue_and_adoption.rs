@@ -2445,69 +2445,6 @@
         );
     }
 
-    #[test]
-    fn viewer_stop_hooks_after_marker_attach_to_it() {
-        // Viewer order: the durable TurnCompleted pushes the marker first; the batch arriving right after merges into it
-        let mut app = make_app_with_agent("sess-view-hooks");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-view-hooks", "chunk", "pid-v", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-view-hooks", "pid-v", "end_turn", false),
-            &mut app,
-        );
-        assert_eq!(
-            last_marker_stop_hook_groups(&app.agents[&AgentId(0)].scrollback),
-            Some(0),
-            "marker starts without hooks"
-        );
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the batch must merge into the existing marker"
-        );
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            0,
-            "no standalone stop block on the live viewer path"
-        );
-
-        // A second, differently-named batch of the same turn (stop_failure and stop on error turns) merges too…
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop_failure", false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(2),
-            "a second batch with a new event name must also merge"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-
-        // …but a same-name repeat (e.g. the session-end `stop` batch) does not belong to this marker and stays standalone.
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-view-hooks", "stop", false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(last_marker_stop_hook_groups(&agent.scrollback), Some(2));
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "a repeated same-name batch falls back to the standalone block"
-        );
-    }
-
     /// No regression: a running prompt whose terminal did NOT arrive in replay is still adopted on load.
     /// The replay terminal set blocks only ended turns.
     #[test]
@@ -2620,5 +2557,104 @@
                 .send_now_painted_blocks
                 .contains_key("p1"),
             "a row draining to running keeps its painted block for the adoption"
+        );
+    }
+
+    /// Put a view in the state its local drain leaves behind: a running turn for `pid` with its acknowledgment watch armed.
+    fn arm_prompt_ack(agent: &mut AgentView, pid: &str) {
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some(pid.into());
+        agent.prompt_ack = Some(crate::app::prompt_ack::PromptAckWatch::new(pid, Instant::now()));
+    }
+
+    /// An overlay child of `AgentId(0)` running its own `pid` with the watch armed (the state an overlay send leaves behind).
+    fn insert_armed_child(app: &mut AppView, child_sid: &str, pid: &str) {
+        let mut child = make_agent(Some(child_sid));
+        arm_prompt_ack(&mut child, pid);
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent
+            .subagent_sessions
+            .insert(child_sid.into(), make_subagent_info(child_sid));
+        parent
+            .subagent_views
+            .insert(child_sid.into(), Box::new(child));
+    }
+
+    /// A `x.ai/queue/changed` naming the awaited prompt (queued or running) disarms the watch; one that does not proves nothing.
+    #[test]
+    fn queue_changed_naming_the_awaited_prompt_disarms_the_watch() {
+        let mut app = make_app_with_agent("sess-1");
+        arm_prompt_ack(app.agents.get_mut(&AgentId(0)).unwrap(), "p1");
+        handle_ext_notification(&queue_changed_running("sess-1", &["other"], None), &mut app);
+        assert!(app.agents[&AgentId(0)].prompt_ack.is_some());
+        handle_ext_notification(&queue_changed_running("sess-1", &[], Some("p1")), &mut app);
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            (None, true),
+            (agent.prompt_ack.as_ref(), agent.session.state.is_turn_running()),
+            "acknowledged; the turn keeps running"
+        );
+    }
+
+    /// A live `session/update` stamped with the awaited prompt id disarms the watch before any branch of the handler applies it.
+    #[test]
+    fn session_update_naming_the_awaited_prompt_disarms_the_watch() {
+        let mut app = make_app_with_agent("sess-1");
+        arm_prompt_ack(app.agents.get_mut(&AgentId(0)).unwrap(), "p1");
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new("sess-1"),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("hi"),
+            ))),
+        )
+        .meta(serde_json::json!({ "promptId": "p1" }).as_object().cloned());
+        handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs { request, response_tx: tx }),
+            &mut app,
+        );
+        let agent = &app.agents[&AgentId(0)];
+        assert_eq!(
+            (None, true),
+            (agent.prompt_ack.as_ref(), agent.session.state.is_turn_running())
+        );
+    }
+
+    /// A live `session/update` on the child session naming the child's awaited prompt disarms the child's watch; the root's stays armed.
+    #[test]
+    fn session_update_on_the_child_session_disarms_the_child_watch_only() {
+        let mut app = make_app_with_agent("sess-1");
+        arm_prompt_ack(app.agents.get_mut(&AgentId(0)).unwrap(), "p-root");
+        insert_armed_child(&mut app, "sess-1-child", "p-child");
+        handle(
+            make_agent_chunk_message_with_prompt("sess-1-child", "hi", "p-child", false),
+            &mut app,
+        );
+        let parent = &app.agents[&AgentId(0)];
+        let child = &parent.subagent_views["sess-1-child"];
+        assert_eq!(
+            (None, true, true),
+            (
+                child.prompt_ack.as_ref(),
+                child.session.state.is_turn_running(),
+                parent.prompt_ack.is_some(),
+            ),
+            "child acknowledged and still running; the root watch is untouched"
+        );
+    }
+
+    /// A `x.ai/queue/changed` on the child session naming the child's awaited prompt disarms the child's watch.
+    #[test]
+    fn queue_changed_on_the_child_session_disarms_the_child_watch() {
+        let mut app = make_app_with_agent("sess-1");
+        insert_armed_child(&mut app, "sess-1-child", "p-child");
+        handle_ext_notification(&queue_changed_running("sess-1-child", &["other"], None), &mut app);
+        assert!(app.agents[&AgentId(0)].subagent_views["sess-1-child"].prompt_ack.is_some());
+        handle_ext_notification(&queue_changed_running("sess-1-child", &[], Some("p-child")), &mut app);
+        let child = &app.agents[&AgentId(0)].subagent_views["sess-1-child"];
+        assert_eq!(
+            (None, true),
+            (child.prompt_ack.as_ref(), child.session.state.is_turn_running()),
+            "acknowledged; the child's turn keeps running"
         );
     }

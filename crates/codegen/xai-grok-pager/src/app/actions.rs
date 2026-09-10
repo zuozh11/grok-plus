@@ -1918,11 +1918,13 @@ pub enum Effect {
         /// Capability minted by the successful feedback POST; absent on the legacy persisted-consent path.
         trace_upload_token: Option<String>,
     },
-    /// Save a remember note to global MEMORY.md (async file write).
+    /// Save a remember note to the active mode's global memory storage.
     SaveMemoryNote {
         agent_id: AgentId,
         text: String,
         cwd: std::path::PathBuf,
+        /// `Some` for an active session; `None` only for the pre-session fallback.
+        pinned_mode: Option<xai_grok_shell::config::MemoryMode>,
     },
     /// Send raw note to x.ai/memory/rewrite for LLM-powered reformatting.
     /// On success, the rewritten text populates the prompt for inline review.
@@ -2235,13 +2237,14 @@ impl TaskResult {
     /// True for results that deliver the first usable session.
     /// A quit before dispatch abandons instead of recording; accepted so the token stays single-owner.
     pub fn ends_startup(&self) -> bool {
-        matches!(
-            self,
+        match self {
             TaskResult::SessionCreated { .. }
-                | TaskResult::SessionLoaded { .. }
-                | TaskResult::WorktreeSessionCreated { .. }
-                | TaskResult::WorktreeForked { .. }
-        )
+            | TaskResult::SessionLoaded { .. }
+            | TaskResult::WorktreeSessionCreated { .. }
+            | TaskResult::WorktreeForked { .. } => true,
+            TaskResult::WithPinnedMemoryMode { result, .. } => result.ends_startup(),
+            _ => false,
+        }
     }
 }
 #[derive(Debug)]
@@ -2276,6 +2279,14 @@ pub enum WorkspaceWriteCompletion {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    /// Session lifecycle result paired with the memory mode pinned by the
+    /// actor that produced it. The wrapper lets all lifecycle variants share
+    /// one typed metadata path.
+    WithPinnedMemoryMode {
+        agent_id: AgentId,
+        memory_mode: Option<xai_grok_shell::config::MemoryMode>,
+        result: Box<TaskResult>,
+    },
     /// A `command` status line finished.
     StatusLineCommandFinished {
         id: crate::app::status_line::RunId,
@@ -2843,7 +2854,7 @@ pub enum TaskResult {
         submission_id: Option<crate::views::feedback_modal::FeedbackSubmissionId>,
         error: Option<String>,
     },
-    /// Memory note saved to global MEMORY.md.
+    /// Memory note save completed.
     MemoryNoteSaved {
         agent_id: AgentId,
         result: Result<(), String>,

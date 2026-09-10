@@ -452,6 +452,19 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
     });
 }
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
+    let result = match result {
+        TaskResult::WithPinnedMemoryMode {
+            agent_id,
+            memory_mode,
+            result,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent.memory_mode = memory_mode;
+            }
+            *result
+        }
+        result => result,
+    };
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
@@ -466,6 +479,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         crate::app::workspace_sync::request(app);
     }
     match result {
+        TaskResult::WithPinnedMemoryMode { .. } => {
+            unreachable!("pinned memory mode wrapper is removed before task-result dispatch")
+        }
         TaskResult::SessionCreated {
             agent_id,
             session_id,

@@ -405,6 +405,7 @@ impl PagerLeaderCluster {
                 ClientMode::Stdio,
                 LeaderClientCapabilities {
                     client_version: Some("0.0.0-test".to_string()),
+                    user_message_echo: true,
                     ..Default::default()
                 },
             ),
@@ -425,6 +426,7 @@ impl PagerLeaderCluster {
                 },
                 LeaderClientCapabilities {
                     client_version: Some("0.0.0-test".to_string()),
+                    user_message_echo: true,
                     ..Default::default()
                 },
                 status_tx,

@@ -609,6 +609,10 @@ impl InstrumentationTimer {
         }
         self
     }
+
+    pub fn subphase_span(&self) -> Option<tracing::Span> {
+        self.subphase_span.clone()
+    }
 }
 
 impl Drop for InstrumentationTimer {

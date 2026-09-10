@@ -379,6 +379,7 @@ async fn rename_fanout_stamps_title_is_manual_meta() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     let mut handle = make_test_handle("test-model", false, None);
@@ -639,6 +640,7 @@ async fn reset_fanout_stamps_title_is_manual_false() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     let mut handle = make_test_handle("test-model", false, None);
@@ -727,6 +729,7 @@ async fn reset_already_auto_is_idempotent_and_skips_persistence_msg() {
         gateway,
         &AgentConfig::default(),
         auth_manager,
+        None,
         None,
     )
     .expect("valid test config");

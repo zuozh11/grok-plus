@@ -72,6 +72,12 @@ pub const COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: &str = "attachment_too_large";
 /// `reason` on `command_rejected` when the BotChat upload is not PostProcessDone.
 pub const COMMAND_REJECTED_ATTACHMENT_NOT_READY: &str = "attachment_not_ready";
 
+/// `reason` on `command_rejected` when the live box gateway refused a well-formed command with its own sentence.
+/// The refusal is an HTTP 4xx carrying a JSON `error` body: `detail.upstream_message`
+/// carries that sentence, and a `failureCode` lands in `detail.upstream` as
+/// `code=<failureCode>`. Nothing was accepted.
+pub const COMMAND_REJECTED_BOX_REFUSED: &str = "box_refused";
+
 /// `reason` on `command_rejected` when the box refused a well-formed
 /// catalog method (capability skew, not a client catalog bug).
 pub const COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: &str = "gateway/unknown-method";
@@ -89,6 +95,7 @@ pub const COMMAND_REJECTED_REASONS: &[&str] = &[
     COMMAND_REJECTED_ATTACHMENT_NOT_READY,
     COMMAND_REJECTED_ATTACHMENT_TOO_LARGE,
     COMMAND_REJECTED_ATTACHMENT_WRONG_SOURCE,
+    COMMAND_REJECTED_BOX_REFUSED,
     COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD,
     COMMAND_REJECTED_HARNESS_REFUSED,
     COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE,
@@ -575,6 +582,34 @@ impl From<LinkStateCode> for BotRelayErrorCode {
             LinkStateCode::LinkConflict => Self::LinkConflict,
             LinkStateCode::CursorAccountUnavailable => Self::CursorAccountUnavailable,
             LinkStateCode::LinkUnsupported => Self::LinkUnsupported,
+        }
+    }
+}
+
+/// The reverse of the `From` above: `Err` carries the non-link-state code back.
+impl TryFrom<BotRelayErrorCode> for LinkStateCode {
+    type Error = BotRelayErrorCode;
+
+    fn try_from(code: BotRelayErrorCode) -> Result<Self, Self::Error> {
+        match code {
+            BotRelayErrorCode::LinkRequired => Ok(Self::LinkRequired),
+            BotRelayErrorCode::LinkRemoved => Ok(Self::LinkRemoved),
+            BotRelayErrorCode::ConsentRequired => Ok(Self::ConsentRequired),
+            BotRelayErrorCode::EnterpriseUnsupported => Ok(Self::EnterpriseUnsupported),
+            BotRelayErrorCode::LegacyPricingUnsupported => Ok(Self::LegacyPricingUnsupported),
+            BotRelayErrorCode::EmailUnverified => Ok(Self::EmailUnverified),
+            BotRelayErrorCode::LinkConflict => Ok(Self::LinkConflict),
+            BotRelayErrorCode::CursorAccountUnavailable => Ok(Self::CursorAccountUnavailable),
+            BotRelayErrorCode::LinkUnsupported => Ok(Self::LinkUnsupported),
+            BotRelayErrorCode::IdentityUnavailable
+            | BotRelayErrorCode::NoPlan
+            | BotRelayErrorCode::UsageExhausted
+            | BotRelayErrorCode::BoxMigrating
+            | BotRelayErrorCode::BoxRecreating
+            | BotRelayErrorCode::BoxUnavailable
+            | BotRelayErrorCode::CommandRejected
+            | BotRelayErrorCode::ComputerUnavailable
+            | BotRelayErrorCode::UpstreamError => Err(code),
         }
     }
 }
@@ -1824,5 +1859,16 @@ mod tests {
             })
         );
         assert!(!wire.as_object().unwrap().contains_key("eventId"));
+    }
+
+    #[test]
+    fn link_state_try_from_agrees_with_is_link_state() {
+        for &code in BotRelayErrorCode::ALL {
+            let converted = LinkStateCode::try_from(code);
+            assert_eq!(code.is_link_state(), converted.is_ok(), "{code}");
+            if let Ok(link) = converted {
+                assert_eq!(code, BotRelayErrorCode::from(link));
+            }
+        }
     }
 }

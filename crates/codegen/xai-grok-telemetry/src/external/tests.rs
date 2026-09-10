@@ -473,6 +473,8 @@ fn startup_completed_records_the_total_histogram_only() {
             resolve_config_ms: Some(22),
             remote_settings_ms: Some(80),
             models_manager_ms: Some(40),
+            managed_policy_auth_wait_ms: None,
+            managed_policy_config_sync_ms: None,
             time_to_first_frame_ms: Some(650),
         },
     );
@@ -480,6 +482,100 @@ fn startup_completed_records_the_total_histogram_only() {
     assert_eq!(
         exported_metric_names(&stream),
         vec!["grok_code.startup.total".to_owned()]
+    );
+}
+
+fn prompt_latency(ttft_ms: Option<u64>, ttfm_ms: Option<u64>) -> events::PromptLatency {
+    events::PromptLatency {
+        turn_index: 0,
+        total_ms: 0,
+        mcp_wait_ms: 0,
+        tool_collection_ms: 0,
+        repo_status_wait_ms: None,
+        model_call_ms: 0,
+        pre_model_ms: 0,
+        mcp_server_count: 0,
+        mcp_tools_registered: 0,
+        mcp_strategy: events::McpStrategy::Blocking,
+        model_id: "sk-supersecretmodeltoken000".into(),
+        ttft_ms,
+        ttlb_ms: 0,
+        attempts: 1,
+        output_tokens: None,
+        before_first_model_ms: 0,
+        sampling_ms: 0,
+        tool_blocking_ms: 0,
+        compaction_ms: 0,
+        between_sampling_overhead_ms: 0,
+        after_last_sampling_ms: 0,
+        turn_total_ms: 0,
+        sampling_request_count: 0,
+        sampling_retry_count: 0,
+        ttfm_ms,
+    }
+}
+
+/// The `model` attribute on the first `grok_code.turn.ttft` histogram datapoint, if present.
+fn turn_ttft_metric_model(stream: &TestStream) -> Option<String> {
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    for rm in &stream.metrics.get_finished_metrics().unwrap() {
+        for sm in rm.scope_metrics() {
+            for m in sm.metrics().filter(|m| m.name() == "grok_code.turn.ttft") {
+                if let AggregatedMetrics::U64(MetricData::Histogram(hist)) = m.data() {
+                    for dp in hist.data_points() {
+                        for kv in dp.attributes() {
+                            if kv.key.as_str() == "model" {
+                                return Some(kv.value.as_str().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn prompt_latency_records_ttft_ttfm_histograms_only() {
+    let both = build(gates_off());
+    emit_event_into(&both, &prompt_latency(Some(120), Some(450)));
+    assert!(exported_events(&both).is_empty(), "metric-only mapping");
+    let mut names = exported_metric_names(&both);
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "grok_code.turn.ttfm".to_owned(),
+            "grok_code.turn.ttft".to_owned()
+        ]
+    );
+    assert_eq!(
+        turn_ttft_metric_model(&both).as_deref(),
+        Some("[REDACTED_SECRET]"),
+        "model rides the metric datapoint scrubbed"
+    );
+
+    let ttft_only = build(gates_off());
+    emit_event_into(&ttft_only, &prompt_latency(Some(120), None));
+    assert_eq!(
+        exported_metric_names(&ttft_only),
+        vec!["grok_code.turn.ttft".to_owned()]
+    );
+
+    let ttfm_only = build(gates_off());
+    emit_event_into(&ttfm_only, &prompt_latency(None, Some(450)));
+    assert_eq!(
+        exported_metric_names(&ttfm_only),
+        vec!["grok_code.turn.ttfm".to_owned()]
+    );
+
+    let neither = build(gates_off());
+    emit_event_into(&neither, &prompt_latency(None, None));
+    assert!(exported_events(&neither).is_empty());
+    assert!(
+        exported_metric_names(&neither).is_empty(),
+        "None gate records nothing"
     );
 }
 

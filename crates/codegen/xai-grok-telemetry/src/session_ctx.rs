@@ -330,8 +330,9 @@ pub fn emit_event_with_origin<T: Serialize + Send + 'static>(
 ) {
     let (event_name, ctx_snapshot, activity, data) = take_emit_context(origin, event_suffix, data);
 
+    // `tokio::spawn` panics without a runtime. Skip before register so PENDING_EVENTS
+    // is not pinned above zero for the rest of the process.
     if tokio::runtime::Handle::try_current().is_err() {
-        // `spawn` below panics without a runtime; counting first would pin the gauge above zero for the rest of the process
         tracing::debug!(event = %event_name, "telemetry: no runtime, dropping event");
         return;
     }
@@ -439,6 +440,13 @@ mod tests {
             started.elapsed() < budget,
             "drain must observe the post finish, not time out"
         );
+    }
+
+    /// `tokio::spawn` panics without a runtime; the session-metrics gate is process-global.
+    #[test]
+    fn emit_event_with_origin_is_noop_without_runtime() {
+        assert!(tokio::runtime::Handle::try_current().is_err());
+        emit_event_with_origin(EmitterOrigin::Shell, "regression-no-runtime", ());
     }
 
     /// Event-name prefixes are wire contract: analytics queries match on them, so they must not drift.

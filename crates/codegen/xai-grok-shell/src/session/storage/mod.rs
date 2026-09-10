@@ -1295,12 +1295,7 @@ pub trait StorageAdapter: Send + Sync {
     async fn update_wake_start(
         &self,
         info: &Info,
-        prior: crate::session::persistence::WakeSummaryState,
-        attempt_id: String,
-        next_trace_turn: u64,
-        model_id: acp::ModelId,
-        agent_name: Option<String>,
-        reasoning_effort: Option<Option<ReasoningEffort>>,
+        start: crate::session::persistence::WakeStart,
         abort: tokio_util::sync::CancellationToken,
     ) -> io::Result<()>;
 

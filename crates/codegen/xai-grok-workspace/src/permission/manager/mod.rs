@@ -11,7 +11,7 @@ use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
 
 use crate::permission::auto_mode::{
     BashSecurityAssessment, ClassifierSecurityFinding, ClassifierVerdict, EnvRisk,
-    KUBECTL_UNSAFE_FLAGS, script_env_risk,
+    KUBECTL_UNSAFE_FLAGS, rg_has_unsafe_flag, script_env_risk,
 };
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
@@ -186,17 +186,6 @@ fn web_fetch_deny_pre_decision(parsed_url: &url::Url, state: &PermissionState) -
     )))
 }
 
-/// True when `words` is an `rg` invocation that enables a preprocessor. It must not ride the built-in safe-command auto-allow (unlike a pipeline, `--pre` stays one bash segment whose primary is still `rg`).
-/// Deliberately does **not** match `--pre-glob`, which only filters when a preprocessor runs and does not itself spawn processes.
-fn rg_has_pre_flag(words: &[String]) -> bool {
-    if crate::permission::policy::normalized_command_head(words).as_deref() != Some("rg") {
-        return false;
-    }
-    words
-        .iter()
-        .any(|w| w == "--pre" || w.starts_with("--pre="))
-}
-
 /// True when `words` is a `kubectl` invocation that selects a caller-controlled kubeconfig, endpoint, auth, or identity.
 /// A read verb like `get`/`logs`/`describe` is not side-effect-free once any of these flags point kubectl at attacker-supplied config/auth.
 /// Such invocations must not ride the safe-command auto-allow (nor a broader whitelist *prefix* grant, see `evaluate_bash`).
@@ -288,7 +277,7 @@ fn is_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -349,7 +338,7 @@ fn is_safe_command_words_str(cmd: &str) -> bool {
         || matches_command_prefix(cmd, "printf")
     // CWE-863: `tee` is not safe-listed; it writes stdin to arbitrary files, so pipelines like `cat data | tee /target` could bypass edit permissions
     //
-    // `rg --pre` is excluded at the words level via [`rg_has_pre_flag`]; the string form here cannot see flag structure reliably after join
+    // [`rg_has_unsafe_flag`] is checked at the words level; the string form here cannot see flag structure reliably after join
 }
 
 /// Commands which are always safe to execute and should never prompt the user.
@@ -391,7 +380,7 @@ fn is_always_safe_command_words(words: &[String]) -> bool {
     if words.is_empty() {
         return false;
     }
-    if rg_has_pre_flag(words) {
+    if rg_has_unsafe_flag(words) {
         return false;
     }
     if kubectl_has_unsafe_flag(words) {
@@ -744,7 +733,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         // kubectl config/auth flags, `rg --pre`, env-dumping `ps`, and git driver/write options must prompt even under a whitelist prefix or blanket grant
         // Always-allow persists only the verb prefix, so that grant cannot cover these variants. An exact segment grant still auto-allows. Do not insert DangerousCommand; that would also block exact grants
         if (kubectl_has_unsafe_flag(words)
-            || rg_has_pre_flag(words)
+            || rg_has_unsafe_flag(words)
             || ps_dumps_environment(words)
             || git_words_have_unsafe_query_option(words))
             && !state.allowed_bash_commands.contains(&s)
@@ -5084,6 +5073,7 @@ mod tests {
                     for cmd in [
                         "kubectl get pods --kubeconfig=/tmp/evil.yaml",
                         "rg --pre ./pre.sh TODO .",
+                        "rg --hostname-bin=./payload needle",
                         "ps auxe",
                         "git cat-file --textconv HEAD:x",
                     ] {
@@ -6903,6 +6893,8 @@ mod tests {
         assert!(!is_safe_command(
             "rg --pre-glob '*.pdf' --pre pdftotext pattern"
         ));
+        assert!(!is_safe_command("rg --hostname-bin=./payload needle"));
+        assert!(!is_safe_command("rg --hostname-bin ./payload needle"));
 
         // The shared unsafe-option table applies to EVERY read-only git verb
         // `--filters`/`--textconv` (and unique long-option abbreviations) run repo-configured content drivers
@@ -7009,6 +7001,10 @@ mod tests {
         // `rg --pre` is not fully safe-listed, so do not narrow to bare `rg`.
         assert_eq!(
             default_always_allow_scope(&words("rg --pre cat pattern")),
+            2
+        );
+        assert_eq!(
+            default_always_allow_scope(&words("rg --hostname-bin=./payload needle")),
             2
         );
         assert_eq!(

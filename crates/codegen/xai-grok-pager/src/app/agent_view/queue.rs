@@ -282,16 +282,8 @@ impl AgentView {
     }
 
     /// Shared tail of every turn-end marker push (`push_turn_terminal_marker`).
-    pub(crate) fn push_end_marker_block(
-        &mut self,
-        event: crate::scrollback::blocks::SessionEvent,
-        stop_hooks: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
-        prompt_id: Option<String>,
-    ) {
-        // The marker keeps its turn's pid for the tail-merge attribution check.
-        let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
-            event, stop_hooks, prompt_id,
-        );
+    pub(crate) fn push_end_marker_block(&mut self, event: crate::scrollback::blocks::SessionEvent) {
+        let block = crate::scrollback::blocks::SessionEventBlock::new(event);
         self.scrollback
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }

@@ -384,6 +384,16 @@ pub enum MetricIncrement {
         outcome: &'static str,
         model: String,
     },
+    /// `grok_code.turn.ttft` (ms from turn start to the first token of any channel: reasoning, text, or a tool call).
+    TurnTtft {
+        duration_ms: u64,
+        model: String,
+    },
+    /// `grok_code.turn.ttfm` (ms from turn start to the first assistant text message; reasoning and tool calls are excluded).
+    TurnTtfm {
+        duration_ms: u64,
+        model: String,
+    },
     /// `grok_code.tool.decision`.
     ToolDecision {
         tool_name: String,
@@ -495,6 +505,8 @@ pub(crate) const METRIC_SESSION_COUNT: &str = "grok_code.session.count";
 pub(crate) const METRIC_TOKEN_USAGE: &str = "grok_code.token.usage";
 pub(crate) const METRIC_COST_USAGE: &str = "grok_code.cost.usage";
 pub(crate) const METRIC_TURN_COUNT: &str = "grok_code.turn.count";
+pub(crate) const METRIC_TURN_TTFT: &str = "grok_code.turn.ttft";
+pub(crate) const METRIC_TURN_TTFM: &str = "grok_code.turn.ttfm";
 pub(crate) const METRIC_TOOL_DECISION: &str = "grok_code.tool.decision";
 pub(crate) const METRIC_TOOL_USAGE: &str = "grok_code.tool.usage";
 pub(crate) const METRIC_ERROR_COUNT: &str = "grok_code.error.count";
@@ -871,6 +883,25 @@ pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> 
         });
     }
     Some(rec)
+}
+
+/// Exports the per-turn first-response histograms, each gated independently: a turn with no model
+/// output records no ttft, and a reasoning-only or tool-only turn records ttft but no ttfm.
+pub fn map_prompt_latency(ev: &events::PromptLatency) -> Option<ExternalRecord> {
+    let mut rec = ExternalRecord::default();
+    if let Some(duration_ms) = ev.ttft_ms {
+        rec = rec.metric(MetricIncrement::TurnTtft {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    if let Some(duration_ms) = ev.ttfm_ms {
+        rec = rec.metric(MetricIncrement::TurnTtfm {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    (!rec.metrics.is_empty()).then_some(rec)
 }
 
 /// `ModelResponseReceived` maps to `grok_code.api_request` and increments `token.usage`.

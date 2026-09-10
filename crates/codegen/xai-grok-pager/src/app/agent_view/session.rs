@@ -9,6 +9,7 @@ use super::{
 use crate::app::agent::AgentSession;
 use crate::app::app_view::InputOutcome;
 use crate::app::cancel_latency::{CancelLatency, CancelOrigin, TurnEnd};
+use crate::app::prompt_ack::{AckSignal, PromptAckWatch};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::text_selection::ResolvedSelectionModel;
 use crate::views::prompt_widget::PromptWidget;
@@ -180,7 +181,6 @@ impl AgentView {
             cleared_workflow_runs: std::collections::HashSet::new(),
             show_workflows: false,
             workflows_view: crate::views::workflows::WorkflowsViewState::default(),
-            pending_stop_hooks: None,
             last_cleared_goal_id: None,
             show_goal_detail: false,
             turn_start_ms: None,
@@ -368,6 +368,7 @@ impl AgentView {
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
+            memory_mode: None,
             billing_surface_visible: false,
             usage_command_visible: true,
             input_log: crate::input_log::InputRingBuffer::new(),
@@ -388,6 +389,7 @@ impl AgentView {
             deferred_send: None,
             pending_turn_end_reconcile: None,
             pending_cancel_resend: None,
+            prompt_ack: None,
             cancel_latency: None,
             expect_send_now_cancel: None,
             front_message_committed: true,
@@ -436,9 +438,49 @@ impl AgentView {
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
         self.last_active_at = Some(now);
+        self.note_prompt_ack(AckSignal::TurnEnded, now);
         if let Some(event) = self.settle_cancel(end, now) {
             xai_grok_telemetry::session_ctx::log_event(event);
         }
+    }
+    /// Start the acknowledgment watch for a prompt this client just drained and sent.
+    /// Chat sessions never arm: the gateway bridge has no queue broadcast, so their first signal is the first delta.
+    pub(crate) fn arm_prompt_ack(&mut self, prompt_id: &str, now: Instant) {
+        if self.chat_kind {
+            return;
+        }
+        self.prompt_ack = Some(PromptAckWatch::new(prompt_id, now));
+    }
+    /// Disarm the watch when a signal names the awaited prompt; anything else (no id, another prompt) is ignored.
+    pub(crate) fn ack_prompt_if_named(
+        &mut self,
+        prompt_id: Option<&str>,
+        signal: AckSignal,
+        now: Instant,
+    ) {
+        if let Some(prompt_id) = prompt_id
+            && self
+                .prompt_ack
+                .as_ref()
+                .is_some_and(|watch| watch.prompt_id() == prompt_id)
+        {
+            self.note_prompt_ack(signal, now);
+        }
+    }
+    /// Disarm the watch: the shell proved it holds the prompt.
+    pub(crate) fn note_prompt_ack(&mut self, signal: AckSignal, now: Instant) {
+        let Some(watch) = self.prompt_ack.take() else {
+            return;
+        };
+        crate::unified_log::info(
+            "prompt.acked",
+            self.session.session_id.as_ref().map(|s| s.0.as_ref()),
+            Some(serde_json::json!({
+                "prompt_id": watch.prompt_id(),
+                "signal": signal,
+                "waited_ms": watch.waited(now).as_millis() as u64,
+            })),
+        );
     }
     /// Cancel the running work and set its latency anchor in one place, so the action and the `CancellationScope` it measures cannot drift apart.
     pub(crate) fn cancel_and_arm(&mut self, scope: CancellationScope, origin: CancelOrigin) {
@@ -510,7 +552,6 @@ impl AgentView {
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
         self.cancel_latency = None;
-        self.pending_stop_hooks = None;
         self.clear_send_now_expectation();
         self.front_message_committed = true;
         self.optimistic_queue_ids.clear();
@@ -639,6 +680,7 @@ impl AgentView {
         }
         self.front_message_committed = false;
         self.pending_cancel_resend = None;
+        self.prompt_ack = None;
         self.cancel_latency = None;
         self.session.start_turn(&mut self.scrollback);
     }
@@ -934,6 +976,13 @@ impl AgentView {
         }
         if !matches!(self.session.state, AgentState::TurnRunning) {
             return None;
+        }
+        if self
+            .prompt_ack
+            .as_ref()
+            .is_some_and(PromptAckWatch::is_soft_noticed)
+        {
+            return Some(TurnActivity::Waiting(WaitingReason::PromptAck));
         }
         if self.bash_turn {
             return None;

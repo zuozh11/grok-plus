@@ -167,6 +167,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
                     persistence_tx,
                     disk_full: crate::session::notifications::idle_disk_full_rx(),
+                    client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
                 },
                 permissions: xai_grok_workspace::permission::PermissionHandle::allow_all(),
                 tool_context,
@@ -212,6 +213,8 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                     cancel: Default::default(),
                 },
                 memory: crate::session::memory_state::SessionMemory {
+                    configured_mode: None,
+                    configured_storage: None,
                     flush_config: crate::config::MemoryFlushConfig::default(),
                     is_flushing: std::sync::atomic::AtomicBool::new(false),
                     last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
@@ -262,6 +265,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(
                     false,
                 )),
+                emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 active_skill: parking_lot::Mutex::new(None),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
@@ -315,12 +319,15 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 deferred_prefix: DeferredPrefix::new(),
                 mcp_startup_waits: Default::default(),
                 mcp_init_tasks: Default::default(),
+                weak_self: std::sync::Weak::new(),
+                startup_tasks: Default::default(),
                 extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
                 last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
                 prefix_carries_fallback_date: std::cell::Cell::new(false),
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                hook_disabled: Default::default(),
                 turn_report: Default::default(),
                 turn_abort: Default::default(),
                 turn_end_tx: Default::default(),

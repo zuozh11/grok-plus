@@ -438,7 +438,7 @@ pub struct TextClickState {
     pub click_count: u8,
 }
 /// Maximum time (ms) between consecutive clicks to count as a multi-click.
-pub(super) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
+pub(crate) const MULTI_CLICK_TIMEOUT_MS: u128 = 300;
 /// Minimum interval (ms) between clipboard toasts for rapid word/line
 /// selections. Drag completions always show the toast regardless.
 const CLIPBOARD_TOAST_DEBOUNCE_MS: u128 = 500;
@@ -598,16 +598,6 @@ pub(crate) struct PendingCancelResend {
     pub cancel_subagents: bool,
     /// Replayed so a resend still enables the shell's task-wake barrier.
     pub trigger: crate::app::actions::CancelTrigger,
-}
-/// Turn-end hook runs held for the live turn's marker. See [`AgentView::pending_stop_hooks`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PendingStopHooks {
-    /// The turn the stash belongs to; a stash that can't be matched to the ending turn flushes standalone instead of attaching to its marker.
-    /// ending turn flushes standalone instead of attaching to its marker.
-    pub prompt_id: Option<String>,
-    /// `(event_name, runs)` per hook batch, in arrival order
-    /// (`stop_failure` before `stop` on error turns).
-    pub groups: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
 }
 /// Components for the deferred fork banner. Stored by `dispatch_fork_resolved` and formatted into the final banner text in `TaskResult::SessionLoaded` once the child's session id is known.
 /// `dispatch_fork_resolved` and formatted into the final banner text
@@ -928,9 +918,6 @@ pub struct AgentView {
     pub cleared_workflow_runs: std::collections::HashSet<String>,
     pub show_workflows: bool,
     pub workflows_view: crate::views::workflows::WorkflowsViewState,
-    /// Turn-end hook runs waiting for the turn's marker, which they race. Consumed or flushed
-    /// by `push_turn_terminal_marker`; dropped on every replay-window entry.
-    pub(crate) pending_stop_hooks: Option<PendingStopHooks>,
     /// Goal id of the most recently cleared goal, captured from the dropped state (the `cleared` event itself carries an empty id). Drops a late in-flight `GoalUpdated` that would otherwise resurrect the cleared chip/modal. Single slot: goal ids are unique, so only the latest clear can race a stale update.
     pub last_cleared_goal_id: Option<String>,
     /// Whether the expanded goal detail overlay is visible.
@@ -1396,6 +1383,10 @@ pub struct AgentView {
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
+    /// Persistent-memory implementation pinned when this session's actor
+    /// spawned. Remember-note effects carry this value rather than consulting
+    /// mutable disk configuration mid-session.
+    pub memory_mode: Option<xai_grok_shell::config::MemoryMode>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
     pub billing_surface_visible: bool,
     /// Whether `/usage` is offered. Mirrors `!AppView::has_external_auth_provider`.
@@ -1457,6 +1448,11 @@ pub struct AgentView {
     /// `session/cancel` is fire-and-forget with known loss windows, so the event loop re-sends the idempotent cancel after
     /// [`super::dispatch::CANCEL_RESEND_GRACE`] while still cancelling.
     pub(crate) pending_cancel_resend: Option<PendingCancelResend>,
+    /// Armed by the local drain for the prompt this client drives; disarmed by
+    /// the first acknowledgment that names it (see `app::prompt_ack`). While
+    /// armed, `dispatch::reconcile_overdue_prompt_acks` runs on the tick arm
+    /// and aborts the turn if the shell never acknowledges.
+    pub(crate) prompt_ack: Option<crate::app::prompt_ack::PromptAckWatch>,
     pub(crate) cancel_latency: Option<CancelLatency>,
     /// Send-now cancel expectation: the client-minted id of an explicit cancel-and-send this client dispatched into a running turn (send-now chord / `SendPromptNow`, or queue-row "Send now"). The running turn's imminent cancel is the silent half of cancel-and-send, so the turn-end rails suppress the "Turn cancelled by user …" marker.
     /// Compat fallback only: a wire `_meta.cancelTrigger` on the turn end is trusted over this flag (`"send_now"` suppresses, anything else renders). Consumed at every driver turn end. Kept across the matching send-now prompt's turn start (so the outgoing turn's cancel

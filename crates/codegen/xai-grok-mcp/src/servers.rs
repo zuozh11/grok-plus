@@ -34,8 +34,10 @@ use rmcp::{
 
 pub use crate::auth_status::McpOauthDiscovery;
 use crate::auth_status::{HttpAuthDecision, decide_http_auth_from_disk};
+pub use crate::generation::{Generation, Replacement, Superseded};
 use crate::oauth::OAUTH_DISCOVERY_TIMEOUT;
 use crate::oauth_config::McpOAuthConfig;
+pub use crate::shared_mcp_state::SharedMcpState;
 
 use xai_grok_tools::types::{
     output::{MCPOutput, MCPOutputDetails, ToolOutput},
@@ -214,68 +216,50 @@ pub struct McpConfigDiff {
     pub retained: Vec<McpServerName>,
 }
 
+/// A server-set change together with the claim for the pass that covers it, taken in one critical section.
+#[must_use = "dropping the change releases the successor pass's claim"]
+pub struct McpConfigChange {
+    pub diff: McpConfigDiff,
+    pub claim: InitClaimGuard,
+}
+
 /// MCP server name used as the key in client/tool maps (e.g. `"github"`, `"grok_com_linear"`).
 pub type McpServerName = String;
 
 /// Unqualified MCP tool name (e.g. `"create_issue"`, without the `server__` prefix).
 type ToolName = String;
 
-/// Typed state machine for MCP-pool initialization.
-/// `Starting` is the pre-`finish_init` window; `Finished` is the post-`finish_init` window where background handshakes may still be draining.
+/// Init state. `Starting` precedes `finish_init`, which fires early so the session is not blocked on MCP; `Finished`
+/// may still have handshakes draining; `Complete` is set by the pass once its last publication has landed.
 #[derive(Debug, Default)]
 pub enum InitProgress {
-    /// Init has never been started, or was cancelled / reset by a config change.
     #[default]
     NotStarted,
-    /// `try_start_init` was called; per-server tasks may be spawning; `finish_init` has NOT yet fired.
-    /// `handshaking` tracks the set of servers whose background handshake is in flight.
     Starting {
-        /// True once this pass has seeded its server set via `mark_handshaking`;
-        /// an empty set counts as complete only after seeding; before it, nothing has started.
+        /// Set once `mark_handshaking` has seeded the set.
         seeded: bool,
         handshaking: std::collections::HashSet<McpServerName>,
     },
-    /// `finish_init` fired (deliberately early, so the session is not blocked on MCP for non-MCP work).
-    /// Background per-server handshakes may still be running; `handshaking` shrinks as each completes.
-    /// `is_complete()` returns `true` only when it is empty.
     Finished {
         handshaking: std::collections::HashSet<McpServerName>,
     },
+    Complete,
 }
 
 impl InitProgress {
-    /// True iff every per-server handshake has settled and `finish_init` has fired.
-    /// Pairs with [`Self::is_in_progress`].
     pub fn is_complete(&self) -> bool {
-        matches!(self, Self::Finished { handshaking } if handshaking.is_empty())
+        matches!(self, Self::Complete)
     }
 
-    /// True once this pass seeded its servers and every seeded handshake concluded,
-    /// even before `finish` fires; `NotStarted` and pre-seed `Starting` are not complete.
-    pub fn handshakes_complete(&self) -> bool {
-        match self {
-            Self::NotStarted => false,
-            Self::Starting {
-                seeded,
-                handshaking,
-            } => *seeded && handshaking.is_empty(),
-            Self::Finished { handshaking } => handshaking.is_empty(),
-        }
-    }
-
-    /// True iff any init work is outstanding: either we are pre-`finish_init`, or per-server handshakes are still in flight in the background.
+    /// Init work is outstanding, including the pass's final publication.
     pub fn is_in_progress(&self) -> bool {
-        match self {
-            Self::Starting { .. } => true,
-            Self::Finished { handshaking } => !handshaking.is_empty(),
-            Self::NotStarted => false,
-        }
+        matches!(self, Self::Starting { .. } | Self::Finished { .. })
     }
 
     /// True iff `finish_init` has fired, regardless of whether background handshakes are still draining.
     /// Used for diagnostic logging that tells the pre-finish window apart from finished with handshakes still draining.
     pub fn has_finished_init(&self) -> bool {
-        matches!(self, Self::Finished { .. })
+        matches!(self, Self::Finished { .. } | Self::Complete)
     }
 
     /// True iff the named server is currently handshaking.
@@ -284,7 +268,7 @@ impl InitProgress {
             Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 handshaking.contains(name)
             }
-            Self::NotStarted => false,
+            Self::NotStarted | Self::Complete => false,
         }
     }
 
@@ -295,7 +279,7 @@ impl InitProgress {
             Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 Some(handshaking.iter())
             }
-            Self::NotStarted => None,
+            Self::NotStarted | Self::Complete => None,
         }
         .into_iter()
         .flatten()
@@ -307,21 +291,7 @@ impl InitProgress {
             Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 handshaking.len()
             }
-            Self::NotStarted => 0,
-        }
-    }
-
-    /// Transition `NotStarted` to `Starting` with an empty handshaking set.
-    /// Returns `true` on successful transition, `false` if init was already started or finished.
-    pub fn try_start(&mut self) -> bool {
-        if matches!(self, Self::NotStarted) {
-            *self = Self::Starting {
-                seeded: false,
-                handshaking: std::collections::HashSet::new(),
-            };
-            true
-        } else {
-            false
+            Self::NotStarted | Self::Complete => 0,
         }
     }
 
@@ -337,13 +307,17 @@ impl InitProgress {
             }
             // Idempotent: already past the finish boundary
             // Per-server handshakes continue draining via `mark_handshake_complete`
-            Self::Finished { .. } => {}
+            Self::Finished { .. } | Self::Complete => {}
             Self::NotStarted => {
                 tracing::warn!(
                     "InitProgress::finish called from NotStarted; staying in NotStarted"
                 );
             }
         }
+    }
+
+    pub fn complete(&mut self) {
+        *self = Self::Complete;
     }
 
     /// Transition any state to `NotStarted`, clearing all per-server progress.
@@ -366,8 +340,8 @@ impl InitProgress {
             Self::Finished { handshaking } => {
                 handshaking.extend(names);
             }
-            Self::NotStarted => {
-                tracing::warn!("InitProgress::mark_handshaking called from NotStarted; ignoring");
+            Self::NotStarted | Self::Complete => {
+                tracing::warn!("InitProgress::mark_handshaking called outside a pass; ignoring");
             }
         }
     }
@@ -379,19 +353,7 @@ impl InitProgress {
             Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
                 handshaking.remove(name);
             }
-            Self::NotStarted => {}
-        }
-    }
-
-    /// Clear the handshaking set entirely.
-    /// The proxy-mode and bg-handshake completion paths use it as a defensive sweep after the per-server `mark_handshake_complete` calls.
-    /// It leaves the set empty before/after `finish_init` fires.
-    pub fn clear_handshaking(&mut self) {
-        match self {
-            Self::Starting { handshaking, .. } | Self::Finished { handshaking } => {
-                handshaking.clear();
-            }
-            Self::NotStarted => {}
+            Self::NotStarted | Self::Complete => {}
         }
     }
 }
@@ -415,7 +377,6 @@ struct AcpMcpRegistry {
     invoker: Arc<dyn crate::acp_transport::AcpReverseInvoker>,
 }
 
-/// Consolidated MCP state behind a single lock. Generation counter detects stale inits.
 /// `Cooling` waits out the backoff; `InFlight` marks a running respawn attempt and carries the token that attempt must present to settle.
 /// An in-flight server is never handed to another trigger, and a token invalidated by config teardown makes the stale attempt's results unusable.
 #[derive(Debug, Clone, Copy)]
@@ -429,9 +390,8 @@ enum UnreachableRetry {
     },
 }
 
-/// The pass that owns init holds this; [`McpState`] keeps only a `Weak` to it, so a dropped pass releases
-/// ownership by construction and the next waiter re-owns. Dropping notifies waiters so they re-check.
-/// Created only by [`McpState::try_start_init`].
+/// Ownership of init. [`McpState`] keeps only a `Weak` to it, so a dropped pass releases ownership and the next
+/// waiter re-owns.
 #[must_use = "dropping the guard releases init ownership"]
 pub struct InitClaimGuard {
     token: std::sync::Arc<()>,
@@ -444,6 +404,7 @@ impl Drop for InitClaimGuard {
     }
 }
 
+/// Consolidated MCP state behind a single lock.
 pub struct McpState {
     pub configs: Vec<acp::McpServer>,
     pub meta_config_map: McpMetaConfigMap,
@@ -456,7 +417,6 @@ pub struct McpState {
     /// Init lifecycle behind the [`InitProgress`] state machine, which rules out nonsensical combinations like "initialized AND initializing".
     /// Private on purpose: external callers must go through the typed transition methods, not poke the variant directly.
     init_progress: InitProgress,
-    pub generation: u64,
     /// Maps qualified tool name to its `_meta` from MCP tools/list. Populated during init.
     pub mcp_tool_meta: HashMap<String, serde_json::Value>,
     /// Maps qualified tool name to its protocol `icons` from MCP tools/list.
@@ -480,6 +440,7 @@ pub struct McpState {
     /// `Weak` to the live [`InitClaimGuard`]; dead once the owning pass drops it.
     init_owner: std::sync::Weak<()>,
     init_signal: std::sync::Arc<tokio::sync::Notify>,
+    generation: Generation,
     event_writer: xai_grok_session_events::EventWriter,
     /// Sender wired by the session actor to its `StatusDispatcher` task.
     /// Intentionally `None` in subagent-pool / shared-pool snapshots ([`SharedMcpPool`]), where the **parent** session owns the notification flow.
@@ -501,7 +462,6 @@ impl McpState {
             shared_clients: HashMap::new(),
             acp_mcp: None,
             init_progress: InitProgress::default(),
-            generation: 0,
             mcp_tool_meta: HashMap::new(),
             mcp_tool_icons: HashMap::new(),
             auth_required: std::collections::HashSet::new(),
@@ -512,6 +472,7 @@ impl McpState {
             disabled_tool_registrations: HashMap::new(),
             init_owner: std::sync::Weak::new(),
             init_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+            generation: Generation::current(),
             event_writer: xai_grok_session_events::EventWriter::noop(),
             client_event_tx: None,
             elicitation_job_tx: None,
@@ -670,29 +631,25 @@ impl McpState {
         self.mcp_tool_icons.clear();
         self.disabled_tool_registrations.clear();
         self.configs = new_configs;
-        self.init_progress.cancel();
+        self.cancel_any_init();
         self.auth_required.clear();
         self.init_failed.clear();
         self.unreachable_retry.clear();
-        self.advance_generation();
+        self.advance_generation(Replacement::ServerSetChange);
         true
     }
 
-    /// Waiters re-read the generation when notified, so advancing it concludes any wait observing the old one.
-    fn advance_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+    fn advance_generation(&mut self, by: Replacement) {
+        self.generation.replace(by);
+        self.generation = Generation::current();
         self.init_signal.notify_waiters();
     }
 
-    /// Supersedes the in-flight init pass without touching configs or connected clients: the next pass builds only what is still missing.
-    /// For callers whose successor pass must land on a different tool bridge, such as an agent rebuild.
-    pub fn restart_init(&mut self) {
-        self.cancel_any_init();
-        self.advance_generation();
+    pub fn current_generation(&self) -> Generation {
+        self.generation.clone()
     }
 
-    /// Per-server teardown shared by config-update paths.
-    /// Forgets every piece of per-server state so a removed or changed server leaves nothing stale behind.
+    /// Forgets every piece of per-server state, so a removed or changed server leaves nothing stale behind.
     fn forget_server(&mut self, name: &str) {
         self.owned_clients.remove(name);
         self.auth_required.remove(name);
@@ -780,8 +737,8 @@ impl McpState {
         );
 
         self.configs = new_configs;
-        self.init_progress.cancel();
-        self.advance_generation();
+        self.cancel_any_init();
+        self.advance_generation(Replacement::ServerSetChange);
 
         Some(McpConfigDiff {
             added,
@@ -790,12 +747,17 @@ impl McpState {
         })
     }
 
-    /// The strict per-server check matters because session actors call [`Self::finish_init`] **early**, right after spawning processes.
-    /// Otherwise they would race the per-server handshakes and the first tool call would land inside the [`ClientState::Initializing`] window.
-    pub fn handshakes_complete(&self) -> bool {
-        self.init_progress.handshakes_complete()
+    /// [`Self::update_configs_diff`], handing the caller the successor pass's claim before any waiter can take it.
+    pub fn change_configs(&mut self, new_configs: Vec<acp::McpServer>) -> Option<McpConfigChange> {
+        let diff = self.update_configs_diff(new_configs)?;
+        Some(McpConfigChange {
+            diff,
+            claim: self.start_init(),
+        })
     }
 
+    /// The strict per-server check matters because session actors call [`Self::finish_init`] **early**, right after spawning processes.
+    /// Otherwise they would race the per-server handshakes and the first tool call would land inside the [`ClientState::Initializing`] window.
     pub fn is_initialized(&self) -> bool {
         self.init_progress.is_complete()
     }
@@ -804,10 +766,12 @@ impl McpState {
     /// In that window `is_initialized()` is still `false` (per-server work remains) AND `is_initializing()` is `true`.
     /// So wait-loops keep waiting instead of kicking off a second init.
     pub fn is_initializing(&self) -> bool {
-        match &self.init_progress {
-            InitProgress::Starting { .. } => self.init_owner.strong_count() > 0,
-            p => p.is_in_progress(),
-        }
+        self.init_progress.is_in_progress() && self.init_owner.strong_count() > 0
+    }
+
+    /// The pass that owned init is gone with handshakes still marked.
+    pub fn is_init_abandoned(&self) -> bool {
+        self.init_progress.is_in_progress() && self.init_owner.strong_count() == 0
     }
 
     /// Returns `true` once `finish_init` has fired, regardless of whether per-server background handshakes are still draining.
@@ -822,63 +786,53 @@ impl McpState {
     }
 
     /// Try to start initialization.
-    /// On the [`InitProgress::NotStarted`] -> [`InitProgress::Starting`] transition, returns the guard that owns the new claim.
-    /// Returns `None` if init is already in progress or finished.
+    /// `None` while a live pass owns init or once init is complete.
     pub fn try_start_init(&mut self) -> Option<InitClaimGuard> {
-        if self.is_initializing() || self.init_progress.has_finished_init() {
+        if self.is_initializing() || self.init_progress.is_complete() {
             return None;
         }
-        // A released claim leaves a dead `Starting`; reclaiming resets it.
-        self.init_progress = InitProgress::NotStarted;
-        if !self.init_progress.try_start() {
-            return None;
-        }
-        let token = std::sync::Arc::new(());
-        self.init_owner = std::sync::Arc::downgrade(&token);
-        Some(InitClaimGuard {
-            token,
-            signal: std::sync::Arc::clone(&self.init_signal),
-        })
+        Some(self.start_init())
     }
 
-    fn owns_init(&self, guard: &InitClaimGuard) -> bool {
+    /// Cancels any pass, starts a new generation, and hands the caller the claim before any waiter can take it.
+    pub fn restart_init(&mut self) -> InitClaimGuard {
+        self.cancel_any_init();
+        self.advance_generation(Replacement::Rebuild);
+        self.start_init()
+    }
+
+    fn start_init(&mut self) -> InitClaimGuard {
+        // A dead pass may have left handshakes marked.
+        self.init_progress = InitProgress::Starting {
+            seeded: false,
+            handshaking: std::collections::HashSet::new(),
+        };
+        let token = std::sync::Arc::new(());
+        self.init_owner = std::sync::Arc::downgrade(&token);
+        InitClaimGuard {
+            token,
+            signal: std::sync::Arc::clone(&self.init_signal),
+        }
+    }
+
+    /// A generation change releases every claim, so a holder that awaited asks again under the lock.
+    pub(crate) fn owns_init(&self, guard: &InitClaimGuard) -> bool {
         self.init_owner
             .upgrade()
             .is_some_and(|live| std::sync::Arc::ptr_eq(&live, &guard.token))
     }
 
-    /// True when `generation` is current; a stale pass's write must no-op instead of mutating the successor generation's state.
-    fn owns_generation(&self, generation: u64) -> bool {
-        if self.generation == generation {
-            return true;
-        }
-        tracing::debug!(
-            stale = generation,
-            current = self.generation,
-            "discarding init-state write from a superseded pass"
-        );
-        false
+    /// The token is cancelled under this lock, so the check holds for every write in the same critical section.
+    pub(crate) fn is_current(&self, generation: &Generation) -> bool {
+        !generation.is_cancelled()
     }
 
     /// Transition [`InitProgress::Starting`] to [`InitProgress::Finished`], preserving the per-server handshaking set; no-op for a stale `generation`.
     /// Called early (before per-server handshakes complete) so the session is unblocked for non-MCP work.
     /// `is_initialized()` still returns `false` until every handshake has reported via [`Self::mark_server_ready`].
-    pub fn finish_init(&mut self, generation: u64) {
-        if !self.owns_generation(generation) {
-            return;
-        }
-        self.init_owner = std::sync::Weak::new();
+    pub fn finish_init(&mut self) {
         self.init_progress.finish();
         self.init_signal.notify_waiters();
-    }
-
-    /// Only the owner cancels; a superseded pass whose successor already owns init is a no-op. Generation changes use [`Self::cancel_any_init`].
-    pub fn cancel_init(&mut self, guard: &InitClaimGuard) -> bool {
-        if !self.owns_init(guard) {
-            return false;
-        }
-        self.cancel_any_init();
-        true
     }
 
     pub fn cancel_any_init(&mut self) {
@@ -889,44 +843,36 @@ impl McpState {
 
     /// Add server names to the handshaking set; call after filtering `configs_to_start`, before spawning per-server tasks; no-op for a stale `generation`.
     /// Only meaningful in [`InitProgress::Starting`] / [`InitProgress::Finished`]; logs a warning otherwise.
-    pub fn mark_servers_initializing(
-        &mut self,
-        generation: u64,
-        names: impl IntoIterator<Item = McpServerName>,
-    ) {
-        if !self.owns_generation(generation) {
-            return;
-        }
+    pub fn mark_servers_initializing(&mut self, names: impl IntoIterator<Item = McpServerName>) {
         let names: Vec<McpServerName> = names.into_iter().collect();
-        // A fresh init attempt clears any prior failure for these servers so a server that recovers on retry stops showing as `Unavailable`
-        // Goes through clear_init_failed so the unreachable-respawn schedule is dropped with it
-        // A fresh attempt supersedes the schedule; a failure re-records it
+        // A fresh attempt clears the prior verdicts (and the unreachable-respawn schedule); a failure re-records them.
         for name in &names {
             self.clear_init_failed(name);
+            self.auth_required.remove(name);
         }
         self.init_progress.mark_handshaking(names);
+        // Servers outside the set stop being pending here.
+        self.init_signal.notify_waiters();
     }
 
     /// Remove a server from the handshaking set (on success or failure of its handshake). Safe if not present; no-op for a stale `generation`.
-    pub fn mark_server_ready(&mut self, generation: u64, name: &str) {
-        if !self.owns_generation(generation) {
-            return;
-        }
+    pub fn mark_server_ready(&mut self, name: &str) {
         self.init_progress.mark_handshake_complete(name);
+        self.init_signal.notify_waiters();
     }
 
-    /// Record a per-server background-init failure for status reporting, routing it to the correct set so the two stay disjoint; no-op for a stale `generation`.
+    /// A live pass may still hand `name` a client.
+    pub fn is_server_pending(&self, name: &str) -> bool {
+        self.is_initializing()
+            && match &self.init_progress {
+                InitProgress::Starting { seeded: false, .. } => true,
+                progress => progress.is_server_handshaking(name),
+            }
+    }
+
+    /// Record a per-server background-init failure for status reporting, routing it to the correct set so the two stay disjoint.
     /// Such servers must NOT also land in `init_failed`, or a server that authenticates would stay reported as `Unavailable` with zero tools.
-    pub fn record_init_failure(
-        &mut self,
-        generation: u64,
-        name: &str,
-        needs_auth: bool,
-        detail: Option<String>,
-    ) {
-        if !self.owns_generation(generation) {
-            return;
-        }
+    pub fn record_init_failure(&mut self, name: &str, needs_auth: bool, detail: Option<String>) {
         if needs_auth {
             self.auth_required.insert(name.to_string());
         } else {
@@ -952,10 +898,7 @@ impl McpState {
 
     /// Record a spawn failure caused by an unreachable endpoint ([`McpError::Unreachable`]); no-op for a stale `generation`.
     /// Never demotes an in-flight attempt: its settle call owns the next transition.
-    pub fn record_unreachable_failure(&mut self, generation: u64, name: &str, detail: String) {
-        if !self.owns_generation(generation) {
-            return;
-        }
+    pub fn record_unreachable_failure(&mut self, name: &str, detail: String) {
         self.record_unreachable_failure_at(
             name,
             detail,
@@ -1071,11 +1014,10 @@ impl McpState {
     /// Clear the entire handshaking set in one shot; no-op for a stale `generation`.
     /// Used as a defensive sweep after the per-server [`Self::mark_server_ready`] calls; cheap no-op if already empty.
     /// Callers: the proxy-mode "init complete" path and the bg-handshake completion path.
-    pub fn mark_all_servers_ready(&mut self, generation: u64) {
-        if !self.owns_generation(generation) {
-            return;
-        }
-        self.init_progress.clear_handshaking();
+    /// A step the pass takes after its last publication, so a waiter released here searches the complete tool set.
+    pub fn complete_init(&mut self) {
+        self.init_progress.complete();
+        self.init_signal.notify_waiters();
     }
 
     /// True iff the named server's handshake is still in flight.
@@ -1101,17 +1043,18 @@ impl McpState {
         self.init_progress.handshaking_count()
     }
 
-    /// Get current generation (for stale check after async init)
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     /// Look up a client by server name.
     /// Owned clients take priority (they can override inherited ones).
     pub fn get_client(&self, name: &str) -> Option<&Arc<McpClient>> {
         self.owned_clients
             .get(name)
             .or_else(|| self.shared_clients.get(name))
+    }
+
+    /// Whether `client` is still the one installed under `name`.
+    pub fn has_client(&self, name: &str, client: &Arc<McpClient>) -> bool {
+        self.get_client(name)
+            .is_some_and(|installed| Arc::ptr_eq(installed, client))
     }
 
     /// Iterate over all clients (owned first, then shared, skipping shared entries whose name is overridden by an owned client).
@@ -3595,17 +3538,9 @@ impl McpClient {
     /// Concurrent callers park on `init_done` instead of issuing a parallel handshake.
     /// If the holder is dropped before publishing, `InitGuard` restores the transport so a later caller can retry; `Drop` uses `try_lock` because it is synchronous.
     pub async fn ensure_initialized(&self) -> Result<McpService, McpError> {
-        // Bound how long a parked caller waits on `init_done` before surfacing an error
-        // A holder legitimately runs up to `handshake_budget_secs` per attempt, and an OAuth-capable client can follow a failed attempt with a token-refresh interlude plus one full retry (the `refresh and retry` block below), so its waiters budget
-        // Wedging silently would recreate the exact "stuck client" failure mode
-        let holder_budget = if self.auth_manager.is_some() && self.http_config.is_some() {
-            self.handshake_budget_secs()
-                .saturating_mul(2)
-                .saturating_add(Self::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS)
-        } else {
-            self.handshake_budget_secs()
-        };
-        let inflight_wait = std::time::Duration::from_secs(holder_budget.saturating_add(1));
+        // Bound how long a parked caller waits on `init_done` before surfacing an error; wedging silently would recreate the exact "stuck client" failure mode
+        let inflight_wait =
+            std::time::Duration::from_secs(self.handshake_worst_case_secs().saturating_add(1));
 
         // Drive the loop body until we either return directly or break out with an owned `PendingTransport`
         // We deliberately use a labelled `loop` with a `break <expr>`
@@ -3884,6 +3819,18 @@ impl McpClient {
         self.startup_timeout_sec.saturating_add(probe_secs)
     }
 
+    /// Worst case for [`Self::ensure_initialized`]: one attempt, or for an OAuth-capable client a failed attempt, a
+    /// token refresh, and a full retry.
+    fn handshake_worst_case_secs(&self) -> u64 {
+        if self.auth_manager.is_some() && self.http_config.is_some() {
+            self.handshake_budget_secs()
+                .saturating_mul(2)
+                .saturating_add(Self::OAUTH_REFRESH_RETRY_ALLOWANCE_SECS)
+        } else {
+            self.handshake_budget_secs()
+        }
+    }
+
     /// Waiter allowance for the token-refresh interlude between an OAuth client's two handshake attempts: metadata/credential hydration is bounded by [`OAUTH_DISCOVERY_TIMEOUT`]-sized steps, plus the refresh
     /// POST itself. The POST rides rmcp's own OAuth client without a total request deadline, so this covers the nominal path; a pathological hung refresh can still outlast waiters, which predates the probe split and needs a deadline inside rmcp's refresh to close fully.
     const OAUTH_REFRESH_RETRY_ALLOWANCE_SECS: u64 = 15;
@@ -4099,6 +4046,14 @@ impl McpClient {
     /// So the change is observed session-wide on the next event.
     pub fn set_event_tx(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>) {
         *self.notify_tx.lock() = tx;
+    }
+
+    /// For a client that will never be installed: drops the watcher's strong `Arc` and the senders that could still
+    /// reach the session.
+    pub fn discard(&self) {
+        self.set_liveness_handle(None);
+        self.set_event_tx(None);
+        self.set_elicitation_tx(None);
     }
 
     pub fn set_elicitation_tx(&self, tx: Option<crate::elicitation::ElicitationInbox>) {
@@ -4349,7 +4304,25 @@ impl McpClient {
         }
     }
 
+    /// The handshake plus the first `tools/list`, bounded so a server that connects and then stalls cannot hold a
+    /// caller indefinitely.
     pub async fn get_tool_registrations(
+        &self,
+        mcp_state: Arc<Mutex<McpState>>,
+    ) -> Result<Vec<McpToolRegistration>, McpError> {
+        let list_window = self
+            .startup_timeout_sec
+            .max(Self::DISCOVER_PROBE_TIMEOUT_SECS);
+        let budget = std::time::Duration::from_secs(
+            self.handshake_worst_case_secs().saturating_add(list_window),
+        );
+        match tokio::time::timeout(budget, self.list_tool_registrations(mcp_state)).await {
+            Ok(result) => result,
+            Err(_) => Err(McpError::timeout(&self.server_name, budget)),
+        }
+    }
+
+    async fn list_tool_registrations(
         &self,
         mcp_state: Arc<Mutex<McpState>>,
     ) -> Result<Vec<McpToolRegistration>, McpError> {

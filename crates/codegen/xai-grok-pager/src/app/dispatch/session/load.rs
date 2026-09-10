@@ -4,7 +4,7 @@ use super::foreign::{
 };
 use super::fork::build_child_fork_marker;
 use super::lifecycle::{
-    abandon_unused_home_session, clear_startup_actions, dispatch_new_session_inner,
+    abandon_unused_empty_for_load, clear_startup_actions, dispatch_new_session_inner,
     dispatch_new_worktree_session, refuse_chat_mode_build_agent,
 };
 use super::picker_routing::{PickerRequest, PickerSeqKind, accept_picker_result};
@@ -164,7 +164,7 @@ fn dispatch_load_session_ungated(
         }
         return vec![];
     }
-    let mut effects = abandon_unused_home_session(app);
+    let mut effects = abandon_unused_empty_for_load(app, &session_id);
     let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);

@@ -1850,14 +1850,6 @@ impl AgentView {
                     buf,
                 );
             }
-            agent::render_hook_hover_popup(
-                buf,
-                layout.scrollback,
-                &self.scrollback,
-                self.hovered_entry,
-                self.last_mouse_pos,
-                &theme,
-            );
             let any_drag_active =
                 self.drag_selection.is_some() || self.block_drag_selection.is_some();
             if !any_drag_active
@@ -2211,7 +2203,15 @@ impl AgentView {
                         })),
                     );
                 }
-                self.activity_started_at = Some(Instant::now());
+                let hook_wait_started = matches!(
+                    activity,
+                    Some(crate::acp::tracker::TurnActivity::Waiting(
+                        crate::acp::tracker::WaitingReason::Hooks { .. }
+                    ))
+                )
+                .then(|| self.session.tracker.hooks_running_since())
+                .flatten();
+                self.activity_started_at = Some(hook_wait_started.unwrap_or_else(Instant::now));
             }
             if activity != self.last_activity {
                 self.last_activity = activity.clone();

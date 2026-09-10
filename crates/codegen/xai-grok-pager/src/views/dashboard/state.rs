@@ -268,6 +268,9 @@ pub enum SectionKey {
     State(RowState),
 }
 
+pub use crate::views::dashboard::actions_focus::ActionsFocus;
+pub(crate) use crate::views::dashboard::actions_focus::Step;
+
 /// A keyboard-navigable cursor target in the dashboard list: a collapsible section header or a row.
 /// Built in display order (see `render::focusables`) so Up/Down navigation and the section/row cursor stay in lockstep with what the renderer paints.
 /// A collapsed section contributes only its header (its rows are absent), so nav skips hidden rows.
@@ -386,6 +389,10 @@ impl PersistedDashboard {
     }
 }
 
+/// Show each spinner frame for this many `spinner_tick` ticks.
+/// The frames come from [`crate::glyphs::dot_spinner_frames`] so they degrade to an ASCII pulse on legacy Windows consoles.
+pub(crate) const SPINNER_DIVISOR: u64 = 4;
+
 /// In-memory dashboard state. Refreshed every render frame off `app.agents`. Selection is keyed by
 /// `DashboardRowId` so a rename / reorder / completion does not invalidate the cursor as long as
 /// the row's id is stable.
@@ -397,7 +404,7 @@ pub struct DashboardState {
     pub hovered_row: Option<DashboardRowId>,
     /// Section-header cursor target.
     /// When `Some`, a collapsible section title (e.g. "Working") holds the cursor instead of a row or the `+ New Agent` button.
-    /// Mutually exclusive with [`Self::selected`] and [`Self::new_agent_button_focused`].
+    /// Mutually exclusive with [`Self::selected`] and [`Self::actions_focus`].
     pub selected_section: Option<SectionKey>,
     /// Hovered section header (mouse-move driven); the renderer brightens its text.
     /// Independent of [`Self::hovered_row`].
@@ -406,7 +413,7 @@ pub struct DashboardState {
     /// In-memory for the dashboard's lifetime; keyed by stable [`SectionKey`].
     pub collapsed_sections: std::collections::HashSet<SectionKey>,
     /// Cursor sits on the Idle group's "N more" overflow toggle row.
-    /// The fourth cursor target; mutually exclusive with [`Self::selected`], [`Self::selected_section`], and [`Self::new_agent_button_focused`]
+    /// The fourth cursor target; mutually exclusive with [`Self::selected`], [`Self::selected_section`], and [`Self::actions_focus`]
     /// (enforced via the `focus_*` helpers).
     pub selected_idle_overflow: bool,
     /// Mouse is hovering the Idle overflow toggle row; the renderer brightens its text.
@@ -468,7 +475,7 @@ pub struct DashboardState {
     pub(crate) selected_stop_action: Option<DashboardStopAction>,
     /// Tick counter for spinner animation.
     /// The counter is bumped by [`crate::app::app_view::AppView::tick`] (NOT the renderer, which is read-only).
-    /// `SPINNER_DIVISOR` divides the index so the on-screen animation stays under 10 Hz at the ~30 Hz tick rate.
+    /// [`SPINNER_DIVISOR`] divides the index so the on-screen animation stays under 10 Hz at the ~30 Hz tick rate.
     pub spinner_tick: u64,
     /// Last frame's row layout: hit areas keyed by row id.
     /// Used by mouse handling to map (col, row) to a row id without scanning the row list a second time.
@@ -545,13 +552,12 @@ pub struct DashboardState {
     /// `Some` while the modal is open; input is routed to it before the dashboard's own handlers, and the renderer paints it on top of the row list.
     /// Cleared on close (Esc, `[✗]`, or the chrome's CloseRequested).
     pub shortcuts_modal: Option<Box<ShortcutsModalState>>,
-    /// True when the header's `[+ New Agent]` button has focus. The button is the default selection
-    /// target when no row is selected; Up-arrow from the first row, Esc deselect, and
-    /// dashboard-open-without-prior-agent all land here.
-    pub new_agent_button_focused: bool,
-    /// True when the v2 actions row's `Open Previous` button has keyboard focus.
-    /// Mutually exclusive with every row/section cursor and [`Self::new_agent_button_focused`].
-    pub open_session_button_focused: bool,
+    /// Which actions-row item holds the keyboard cursor, if any.
+    /// `Some(NewAgent)` is the default target when no row is selected; Up-arrow from the first row, Esc deselect, and
+    /// dashboard-open-without-prior-agent all land there.
+    /// Mutually exclusive with every row/section cursor: at most one of `selected`, `selected_section`, `selected_idle_overflow`,
+    /// and this is set (row churn can leave all four clear). Write it through the `focus_*` helpers so that invariant holds.
+    pub actions_focus: Option<ActionsFocus>,
     /// Model chosen for the next agent spawned from the dispatch input, set by `/model <name> [effort]`
     /// (intercepted in `dispatch_dashboard_dispatch_slash`). `None` spawns on the default model. Sticky
     /// across dispatches; reset to `None` on every dashboard-open (alongside `pending_mode`).
@@ -1258,9 +1264,8 @@ impl DashboardState {
             multiline_mode: false,
             usage_modal: None,
             // Fresh dashboard with no rows seeded, so the `+ New Agent` button is the default cursor target
-            // Open sites that want a specific row seeded call `focus_row` after construction, which clears this flag atomically
-            new_agent_button_focused: true,
-            open_session_button_focused: false,
+            // Open sites that want a specific row seeded call `focus_row` after construction, which clears this atomically
+            actions_focus: Some(ActionsFocus::NewAgent),
         }
     }
 
@@ -1329,30 +1334,83 @@ impl DashboardState {
         self.worktree_toggle_hit.set(None);
     }
 
-    /// Focus the actions row's `+ New Agent` button.
-    /// Clears any row selection so the "button focused means no row selected" invariant stays honoured.
-    /// Idempotent; safe to call when the button is already focused.
-    pub fn focus_new_agent_button(&mut self) {
-        self.new_agent_button_focused = true;
-        self.open_session_button_focused = false;
+    /// True when the actions row's `+ New Agent` button holds the cursor.
+    pub fn new_agent_button_focused(&self) -> bool {
+        self.actions_focus == Some(ActionsFocus::NewAgent)
+    }
+
+    /// True when the actions row's `Open Previous` button holds the cursor.
+    pub fn open_session_button_focused(&self) -> bool {
+        self.actions_focus == Some(ActionsFocus::OpenPrevious)
+    }
+
+    /// True when the actions row's `Worktree` toggle holds the cursor.
+    pub fn worktree_toggle_focused(&self) -> bool {
+        self.actions_focus == Some(ActionsFocus::Worktree)
+    }
+
+    /// Move the cursor onto an actions-row item.
+    /// Clears any row/section selection so the "actions row focused means no row selected" invariant stays honoured.
+    /// Idempotent; safe to call when the item is already focused.
+    pub fn focus_action(&mut self, item: ActionsFocus) {
+        self.actions_focus = Some(item);
         self.selected = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
         self.delete_confirm = None;
+    }
+
+    /// Focus the actions row's `+ New Agent` button.
+    pub fn focus_new_agent_button(&mut self) {
+        self.focus_action(ActionsFocus::NewAgent);
     }
 
     pub fn focus_open_session_button(&mut self) {
-        self.open_session_button_focused = true;
-        self.new_agent_button_focused = false;
-        self.selected = None;
-        self.selected_section = None;
-        self.selected_idle_overflow = false;
-        self.delete_confirm = None;
+        self.focus_action(ActionsFocus::OpenPrevious);
     }
 
-    /// Focus the row identified by `id`. Clears the `new_agent_button_focused` flag so the two cursor
-    /// states stay mutually exclusive. Any caller that mutates `selected` directly bypasses this helper
-    /// at its own risk. ; the invariant only holds when both fields are written through here.
+    /// The painted actions-row item one step left or right of the focused one; `None` at either end (no wrap) or when the actions
+    /// row has no focus. See [`ActionsFocus::neighbour`].
+    fn actions_neighbour(&self, step: Step) -> Option<ActionsFocus> {
+        self.actions_focus?.neighbour(self, step)
+    }
+
+    /// What a click (or Enter) on the focused actions-row item does; `None` when no item holds the cursor.
+    /// `+ New Agent` with a typed draft is the caller's business: the list-focused Enter path sends the draft instead.
+    pub(crate) fn focused_action_click(&self) -> Option<Action> {
+        Some(match self.actions_focus? {
+            ActionsFocus::NewAgent => Action::DashboardCreateNewAgentWithDetail,
+            ActionsFocus::OpenPrevious => Action::ShowSessionPicker,
+            ActionsFocus::Worktree => Action::DashboardToggleWorktree,
+        })
+    }
+
+    /// The footer label for Enter on the focused actions-row item.
+    /// `+ New Agent` with a typed draft sends it rather than creating an empty session, and the label says so.
+    pub(crate) fn focused_action_label(&self) -> Option<&'static str> {
+        Some(match self.actions_focus? {
+            ActionsFocus::NewAgent if self.focused_new_agent_sends_draft() => "send",
+            ActionsFocus::NewAgent => "create",
+            ActionsFocus::OpenPrevious => "open previous",
+            ActionsFocus::Worktree if self.worktree_armed() => "disable worktree",
+            ActionsFocus::Worktree => "enable worktree",
+        })
+    }
+
+    /// True when Enter on the focused `+ New Agent` would send the typed draft instead of creating an empty session.
+    pub(crate) fn focused_new_agent_sends_draft(&self) -> bool {
+        self.new_agent_button_focused() && !self.dispatch.text().trim().is_empty()
+    }
+
+    /// Whether the next dispatch goes into a fresh git worktree: the mode is on and the cwd is a git repo, so it can take effect.
+    /// The actions row's labels and the footer's Enter hint both read this so they cannot drift apart.
+    pub(crate) fn worktree_armed(&self) -> bool {
+        self.dispatch_worktree && self.cwd_has_git_ancestor
+    }
+
+    /// Focus the row identified by `id`. Clears the actions-row cursor so the cursor states stay
+    /// mutually exclusive. Any caller that mutates `selected` directly bypasses this helper
+    /// at its own risk; the invariant only holds when both fields are written through here.
     pub fn focus_row(&mut self, id: DashboardRowId) {
         if self
             .delete_confirm
@@ -1362,8 +1420,7 @@ impl DashboardState {
             self.delete_confirm = None;
         }
         self.selected = Some(id);
-        self.new_agent_button_focused = false;
-        self.open_session_button_focused = false;
+        self.actions_focus = None;
         self.selected_section = None;
         self.selected_idle_overflow = false;
     }
@@ -1383,8 +1440,7 @@ impl DashboardState {
     pub fn focus_section(&mut self, key: SectionKey) {
         self.selected_section = Some(key);
         self.selected = None;
-        self.new_agent_button_focused = false;
-        self.open_session_button_focused = false;
+        self.actions_focus = None;
         self.selected_idle_overflow = false;
         self.delete_confirm = None;
     }
@@ -1395,8 +1451,7 @@ impl DashboardState {
         self.selected_idle_overflow = true;
         self.selected = None;
         self.selected_section = None;
-        self.new_agent_button_focused = false;
-        self.open_session_button_focused = false;
+        self.actions_focus = None;
         self.delete_confirm = None;
     }
 
@@ -2881,10 +2936,11 @@ impl DashboardState {
             if let Some(id) = self.selected.clone() {
                 return InputOutcome::Action(Action::DashboardAttach(id));
             }
-            if self.new_agent_button_focused {
-                return InputOutcome::Action(Action::DashboardCreateNewAgentWithDetail);
-            }
-            return InputOutcome::Unchanged;
+            // An empty Enter acts on the focused actions-row item, whichever pane has focus, so a click on `Worktree` or
+            // `Open Previous` never leaves Enter dead while the footer promises an action
+            return self
+                .focused_action_click()
+                .map_or(InputOutcome::Unchanged, InputOutcome::Action);
         }
         if trimmed.starts_with('/') {
             return InputOutcome::Action(Action::DashboardDispatchSlash { text });
@@ -3008,25 +3064,21 @@ impl DashboardState {
         // Special cases (Esc cascade, Enter dispatch) are handled below because they require multi-tier
         // behaviour (clear filter, clear input, exit) that a single registry action can't express.
 
-        if self.list_focused && key.modifiers.is_empty() {
-            let vim_button_nav = vim_mode && matches!(key.code, KeyCode::Char('h' | 'l'));
-            match key.code {
-                KeyCode::Left | KeyCode::Char('h')
-                    if (matches!(key.code, KeyCode::Left) || vim_button_nav)
-                        && self.new_agent_button_focused
-                        && self.open_session_button_hit.rect.is_some() =>
-                {
-                    self.focus_open_session_button();
+        // ←/→ (and vim h/l) walk the actions row in visual order while an item there holds the cursor, stopping at both ends
+        if self.list_focused && key.modifiers.is_empty() && self.actions_focus.is_some() {
+            let step = match key.code {
+                KeyCode::Left => Some(Step::Left),
+                KeyCode::Right => Some(Step::Right),
+                KeyCode::Char('h') if vim_mode => Some(Step::Left),
+                KeyCode::Char('l') if vim_mode => Some(Step::Right),
+                _ => None,
+            };
+            if let Some(step) = step {
+                if let Some(item) = self.actions_neighbour(step) {
+                    self.focus_action(item);
                     return InputOutcome::Changed;
                 }
-                KeyCode::Right | KeyCode::Char('l')
-                    if (matches!(key.code, KeyCode::Right) || vim_button_nav)
-                        && self.open_session_button_focused =>
-                {
-                    self.focus_new_agent_button();
-                    return InputOutcome::Changed;
-                }
-                _ => {}
+                return InputOutcome::Unchanged;
             }
         }
 
@@ -3210,6 +3262,14 @@ impl DashboardState {
                 self.manual_scroll_active = false;
                 return InputOutcome::Changed;
             }
+            // A right-hand actions-row item steps back to `+ New Agent` first; only from there does Esc exit
+            if self
+                .actions_focus
+                .is_some_and(|item| item != ActionsFocus::NewAgent)
+            {
+                self.focus_new_agent_button();
+                return InputOutcome::Changed;
+            }
             return InputOutcome::Action(Action::ExitDashboard);
         }
 
@@ -3265,14 +3325,12 @@ impl DashboardState {
                 if let Some(id) = self.selected.clone() {
                     return InputOutcome::Action(Action::DashboardAttach(id));
                 }
-                if self.open_session_button_focused {
-                    return InputOutcome::Action(Action::ShowSessionPicker);
+                // Enter on a right-hand item acts like a click on it, draft or no draft; only `+ New Agent` sends a typed draft
+                if self.focused_new_agent_sends_draft() {
+                    return self.dispatch_send_action(false);
                 }
-                if self.new_agent_button_focused {
-                    if !self.dispatch.text().trim().is_empty() {
-                        return self.dispatch_send_action(false);
-                    }
-                    return InputOutcome::Action(Action::DashboardCreateNewAgentWithDetail);
+                if let Some(action) = self.focused_action_click() {
+                    return InputOutcome::Action(action);
                 }
                 return InputOutcome::Unchanged;
             }
@@ -3686,6 +3744,7 @@ impl DashboardState {
             }
 
             if self.worktree_toggle_hit.contains(mouse.column, mouse.row) {
+                self.focus_action(ActionsFocus::Worktree);
                 return InputOutcome::Action(Action::DashboardToggleWorktree);
             }
 
@@ -3750,7 +3809,7 @@ impl DashboardState {
                 // Clicking a row is selection-driven, so re-engage the clamp's snap-to-selection by clearing the manual-scroll flag
                 // Without this, a click after a wheel-scroll would jump the viewport on the next frame (the bias-up pull-back kicks in)
                 self.manual_scroll_active = false;
-                // `focus_row` also clears `new_agent_button_focused` so the two cursor states stay mutually exclusive (clicking a row while the
+                // `focus_row` also clears `actions_focus` so the two cursor states stay mutually exclusive (clicking a row while the
                 // button was focused hands the cursor over to the row)
                 self.focus_row(id.clone());
                 self.last_click = Some((id.clone(), Instant::now()));

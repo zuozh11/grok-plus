@@ -50,11 +50,14 @@ same from the dispatch box.
 
 The **actions row** below it holds `+ New Agent` (the default cursor target
 when no row is selected) and, on the right, `Open Previous` (the session
-picker — click it, `←` onto it and press `Enter`, or type `/resume`;
-workspace dashboard only) and the **worktree toggle** (`Ctrl+W`, or click
-it). With worktree mode on inside a git repo, the row reads
-`+ New Agent in Worktree` / `Disable Worktree`, and the next dispatch creates
-the agent in a fresh git worktree.
+picker; workspace dashboard only) and the **worktree toggle**. With the list
+focused (`Tab`), `→` / `←` (or `l` / `h` in vim mode) move the cursor along
+the row in that order, stopping at either end; `Enter` acts like a click on
+the focused item — create, open the picker, or toggle worktree mode — and
+`Esc` steps back to `+ New Agent`. The same actions are always a click or
+`/resume` / `Ctrl+W` away. With worktree mode on inside a git repo, the row
+reads `+ New Agent in Worktree` / `Disable Worktree`, and the next dispatch
+creates the agent in a fresh git worktree.
 
 Each row is a top-level agent. Sort by state (Needs input → Working → Idle →
 Inactive → Completed → Failed) so same-state rows sit together, or by working

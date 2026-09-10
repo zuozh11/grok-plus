@@ -17,6 +17,7 @@ import kotlinx.serialization.json.jsonPrimitive
 val V1_COMMAND_ALLOWLIST: List<String> = listOf(
     "attachUpload",
     "authenticateMcpServer",
+    "completeGithubConnect",
     "completeMcpOAuth",
     "connectChannel",
     "countAgents",
@@ -45,6 +46,8 @@ val V1_COMMAND_ALLOWLIST: List<String> = listOf(
     "getBotTemplateVersion",
     "getForeverBoxStatus",
     "getHostSettings",
+    "getListenerConnectUrl",
+    "getListenerIntegrations",
     "getMcpCatalog",
     "getMcpState",
     "getSubagents",
@@ -111,6 +114,17 @@ sealed interface BotCommand {
     ) : BotCommand {
         companion object {
             const val NAME = "authenticateMcpServer"
+        }
+    }
+
+    @Serializable
+    data class CompleteGithubConnect(
+        val agentId: String,
+        @EncodeDefault override val name: String = NAME,
+        val args: ArgsCompleteGithubConnect,
+    ) : BotCommand {
+        companion object {
+            const val NAME = "completeGithubConnect"
         }
     }
 
@@ -419,6 +433,28 @@ sealed interface BotCommand {
     ) : BotCommand {
         companion object {
             const val NAME = "getHostSettings"
+        }
+    }
+
+    @Serializable
+    data class GetListenerConnectUrl(
+        val agentId: String,
+        @EncodeDefault override val name: String = NAME,
+        val args: ArgsGetListenerConnectUrl,
+    ) : BotCommand {
+        companion object {
+            const val NAME = "getListenerConnectUrl"
+        }
+    }
+
+    @Serializable
+    data class GetListenerIntegrations(
+        val agentId: String,
+        @EncodeDefault override val name: String = NAME,
+        val args: ArgsClearTrays,
+    ) : BotCommand {
+        companion object {
+            const val NAME = "getListenerIntegrations"
         }
     }
 
@@ -847,6 +883,7 @@ object BotCommandSerializer :
         return when (element.jsonObject["name"]?.jsonPrimitive?.content) {
             BotCommand.AttachUpload.NAME -> BotCommand.AttachUpload.serializer()
             BotCommand.AuthenticateMcpServer.NAME -> BotCommand.AuthenticateMcpServer.serializer()
+            BotCommand.CompleteGithubConnect.NAME -> BotCommand.CompleteGithubConnect.serializer()
             BotCommand.CompleteMcpOAuth.NAME -> BotCommand.CompleteMcpOAuth.serializer()
             BotCommand.ConnectChannel.NAME -> BotCommand.ConnectChannel.serializer()
             BotCommand.CountAgents.NAME -> BotCommand.CountAgents.serializer()
@@ -875,6 +912,8 @@ object BotCommandSerializer :
             BotCommand.GetBotTemplateVersion.NAME -> BotCommand.GetBotTemplateVersion.serializer()
             BotCommand.GetForeverBoxStatus.NAME -> BotCommand.GetForeverBoxStatus.serializer()
             BotCommand.GetHostSettings.NAME -> BotCommand.GetHostSettings.serializer()
+            BotCommand.GetListenerConnectUrl.NAME -> BotCommand.GetListenerConnectUrl.serializer()
+            BotCommand.GetListenerIntegrations.NAME -> BotCommand.GetListenerIntegrations.serializer()
             BotCommand.GetMcpCatalog.NAME -> BotCommand.GetMcpCatalog.serializer()
             BotCommand.GetMcpState.NAME -> BotCommand.GetMcpState.serializer()
             BotCommand.GetSubagents.NAME -> BotCommand.GetSubagents.serializer()
@@ -926,6 +965,7 @@ object BotCommandSerializer :
  */
 typealias BotCommandReplyAttachUpload = SandUploadAttachmentResult
 typealias BotCommandReplyAuthenticateMcpServer = SandMcpAuthResult
+typealias BotCommandReplyCompleteGithubConnect = SandGithubConnectCompletion
 typealias BotCommandReplyCompleteMcpOAuth = JsonElement
 typealias BotCommandReplyConnectChannel = SandChannelsView
 typealias BotCommandReplyCountAgents = Double
@@ -954,6 +994,8 @@ typealias BotCommandReplyGetBotTemplateForSourceAgent = ReplyGetBotTemplateForSo
 typealias BotCommandReplyGetBotTemplateVersion = SandBotTemplateGatewayView
 typealias BotCommandReplyGetForeverBoxStatus = SandForeverBoxStatus?
 typealias BotCommandReplyGetHostSettings = SandHostSettings
+typealias BotCommandReplyGetListenerConnectUrl = ReplyGetListenerConnectUrl
+typealias BotCommandReplyGetListenerIntegrations = SandListenerIntegrationsView
 typealias BotCommandReplyGetMcpCatalog = List<SandMcpCatalogEntryView>
 typealias BotCommandReplyGetMcpState = SandMcpState
 typealias BotCommandReplyGetSubagents = List<SandSubagentInfo>

@@ -1102,6 +1102,7 @@ impl SessionActor {
             self.maybe_inject_mcp_connecting_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
+            self.inject_fork_reminder().await;
             self.inject_resumed_tasks_reminder();
             if policy.authority.is_human_intent() {
                 if let Some(gate) = &self.tool_context.task_wake_suppressed {
@@ -1231,6 +1232,8 @@ impl SessionActor {
                     .is_ok()
                     && matches!(flush_rx.await, Ok(Ok(())))
                 {
+                    let session_dir = crate::session::persistence::session_dir(&self.session_info);
+                    crate::session::fork_status::commit_claim(&session_dir);
                     if let Some(ack) = persist_ack {
                         let _ = ack.send(());
                     }
@@ -2101,9 +2104,46 @@ impl SessionActor {
         {
             return None;
         }
+        let is_v2 =
+            self.memory.is_enabled() && self.memory.mode() == Some(crate::config::MemoryMode::V2);
         self.memory
             .context_injected
             .store(true, std::sync::atomic::Ordering::Relaxed);
+        if is_v2 {
+            let conversation = self.chat_state_handle.get_conversation().await;
+            if crate::session::helpers::memory_context::conversation_has_memory_context(
+                &conversation,
+            ) {
+                tracing::info!(
+                    target: xai_grok_telemetry::memory_log::TARGET,
+                    "MEMORY_INJECT: persisted v2 manifests reused to preserve prompt cache"
+                );
+                return None;
+            }
+            let storage = self.memory.storage()?;
+            let context = tokio::task::spawn_blocking(move || {
+                crate::session::helpers::memory_context::format_v2_memory_context(&storage)
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(std::convert::identity);
+            return match context {
+                Ok(context) => {
+                    self.memory
+                        .injection_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(context)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: xai_grok_telemetry::memory_log::TARGET,
+                        %error,
+                        "MEMORY_INJECT: failed to generate v2 manifest context"
+                    );
+                    None
+                }
+            };
+        }
         if !self.memory.initial_injection_config.enabled {
             tracing::info!(
                 target: xai_grok_telemetry::memory_log::TARGET,
@@ -3176,10 +3216,7 @@ impl SessionActor {
             self.record_response_token_usage(&response, Some(model_duration_ms));
             let response_completed = self.response_completed_update(&response);
             if let Some(mut pt) = prompt_timing.take() {
-                pt.record_stream_latency(
-                    latency.time_to_first_token_ms,
-                    latency.time_to_last_byte_ms,
-                );
+                pt.record_stream_latency(latency.time_to_last_byte_ms);
                 pt.record_model_result(
                     latency.attempts,
                     response.usage.as_ref().map(|u| u.completion_tokens),
@@ -3251,13 +3288,15 @@ impl SessionActor {
                 ))
                 .await;
                 self.push_system_reminder(&reminder);
+                self.turn_phases.discard_uncommitted_first_token();
                 self.turn_phases.discard_uncommitted_first_meaningful();
                 continue;
             }
             metrics_drop_guard.record_model_response(tool_calls.len());
             if !tool_calls.is_empty() {
-                self.record_turn_first_meaningful_output(None);
+                self.record_turn_first_token(None);
             }
+            self.turn_phases.commit_first_token();
             self.turn_phases.commit_first_meaningful();
             if let Some(fp) = response
                 .assistant()
@@ -3305,6 +3344,7 @@ impl SessionActor {
                     text_len = text.len(),
                     "emitting fallback AgentMessageChunk — no text chunks were streamed"
                 );
+                self.record_turn_first_token(None);
                 self.record_turn_first_meaningful_output(None);
                 self.send_update(
                     acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(

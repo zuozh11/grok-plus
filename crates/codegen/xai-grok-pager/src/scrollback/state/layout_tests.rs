@@ -114,11 +114,10 @@ fn test_push_user_prompt_appends_prompt_descriptor() {
     assert_eq!(pd.y_virtual, cache.virtual_y[prompt_idx]);
 }
 
-/// A hook-collapsed turn marker keeps its blank row against collapsed tool and subagent rows on both sides.
+/// A collapsed turn marker keeps its blank row against collapsed tool and subagent rows on both sides.
 /// The incremental extend path and the full recompute must agree.
 #[test]
 fn collapsed_turn_marker_keeps_gap_from_collapsed_neighbors() {
-    use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
     use crate::scrollback::blocks::{SessionEvent, SubagentBlock};
     use std::time::Duration;
 
@@ -139,18 +138,10 @@ fn collapsed_turn_marker_keeps_gap_from_collapsed_neighbors() {
     let marker = state.push_block(RenderBlock::session_event(SessionEvent::TurnCompleted {
         elapsed: Some(Duration::from_secs(3)),
     }));
-    assert!(state.attach_stop_hooks_to_marker(
-        marker,
-        "stop".into(),
-        vec![HookRunEntry {
-            name: "notify".into(),
-            status: HookRunStatus::Success {
-                elapsed: Duration::from_millis(1),
-            },
-            output: None,
-        }],
-        None,
-    ));
+    state
+        .get_by_id_mut(marker)
+        .unwrap()
+        .set_display_mode(DisplayMode::Collapsed);
     state.prepare_layout(80, 40);
     assert_eq!(
         state.get_by_id(marker).unwrap().display_mode,

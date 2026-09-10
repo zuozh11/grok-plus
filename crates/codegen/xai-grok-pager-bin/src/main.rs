@@ -493,11 +493,32 @@ fn env_flag_enabled(value: &str) -> bool {
         "" | "0" | "false" | "off" | "no"
     )
 }
-/// Blocking fetch of remote settings via the startup prefetch path,
-/// capped at the early-prefetch wait so a slow endpoint cannot stall the CLI.
-fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
-    xai_grok_shell::agent::models::startup_prefetch::begin(None);
-    xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT)
+/// File and managed IdP for a settings query that runs before effective-config load.
+fn load_grok_com_config_for_settings() -> xai_grok_shell::auth::GrokComConfig {
+    xai_grok_shell::config::load_agent_config_disk_only()
+        .map(|cfg| cfg.grok_com_config)
+        .unwrap_or_default()
+}
+/// Async fetch of remote settings via the startup getter, capped at the
+/// early-prefetch wait so a slow endpoint cannot stall the CLI. Awaits the async
+/// getter directly: this runs under a current-thread runtime where the sync
+/// `block_on_startup_settings` returns `TimedOut` immediately with no published
+/// value, so it would fall open and let workspace refuse the command before the
+/// load could complete.
+async fn fetch_remote_settings(
+    grok_com_config: &xai_grok_shell::auth::GrokComConfig,
+) -> Option<xai_grok_shell::util::config::RemoteSettings> {
+    let query = xai_grok_shell::agent::remote_config::settings_get::SettingsQuery::resolve(
+        None,
+        Some(grok_com_config.clone()),
+    );
+    let wait = xai_grok_shell::agent::remote_config::settings_get::await_startup_settings(
+        query,
+        EARLY_PREFETCH_WAIT,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    xai_grok_shell::agent::remote_config::settings_get::consume_wait(wait, None, grok_com_config)
 }
 #[tracing::instrument(level = "debug", skip_all)]
 async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
@@ -516,8 +537,9 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         );
     }
     let env_override = workspace_command_env_override();
+    let grok_com_config = load_grok_com_config_for_settings();
     let remote_settings = if env_override.is_none() {
-        fetch_remote_settings()
+        fetch_remote_settings(&grok_com_config).await
     } else {
         None
     };
@@ -539,10 +561,18 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
     }
     match args.command {
         WorkspaceMgmtCommand::Start(a) => {
-            workspace_start(a, false, remote_settings.or_else(fetch_remote_settings)).await
+            let settings = match remote_settings {
+                Some(settings) => Some(settings),
+                None => fetch_remote_settings(&grok_com_config).await,
+            };
+            workspace_start(a, false, settings).await
         }
         WorkspaceMgmtCommand::Restart(a) => {
-            workspace_start(a, true, remote_settings.or_else(fetch_remote_settings)).await
+            let settings = match remote_settings {
+                Some(settings) => Some(settings),
+                None => fetch_remote_settings(&grok_com_config).await,
+            };
+            workspace_start(a, true, settings).await
         }
         WorkspaceMgmtCommand::Pause { target, json } => {
             workspace_control(&target, json, ControlCommand::WorkspacePause).await
@@ -1168,7 +1198,18 @@ async fn run_agent_command(
             }
         }
     }
-    let had_prefetch = xai_grok_shell::agent::models::startup_prefetch::begin(None);
+    let grok_com_config = load_grok_com_config_for_settings();
+    let settings_query = xai_grok_shell::agent::remote_config::settings_get::SettingsQuery::resolve(
+        None,
+        Some(grok_com_config.clone()),
+    );
+    let had_prefetch =
+        xai_grok_shell::agent::remote_config::settings_get::is_eligible(&settings_query);
+    if had_prefetch {
+        xai_grok_shell::agent::remote_config::settings_get::warm_startup_settings(
+            settings_query.clone(),
+        );
+    }
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
@@ -1191,7 +1232,17 @@ async fn run_agent_command(
         }
     }
     let remote_settings = if had_prefetch {
-        xai_grok_shell::agent::models::startup_prefetch::wait_settings(EARLY_PREFETCH_WAIT)
+        let wait = xai_grok_shell::agent::remote_config::settings_get::await_startup_settings(
+            settings_query,
+            EARLY_PREFETCH_WAIT,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        xai_grok_shell::agent::remote_config::settings_get::consume_wait(
+            wait,
+            None,
+            &grok_com_config,
+        )
     } else {
         None
     };
@@ -1343,6 +1394,7 @@ async fn run_agent_command(
             fs_read: false,
             fs_write: false,
             status_line: false,
+            user_message_echo: false,
         };
         let conn = connect_or_spawn(&client_type, mode, &env_urls, capabilities.clone()).await?;
         let (tx, rx) = conn.into_channels();

@@ -42,7 +42,7 @@ pub mod mcp_methods {
     pub const INIT_PROGRESS: &str = "x.ai/mcp/init_progress";
 }
 use crate::agent::MvpAgent;
-use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpState};
+use crate::session::mcp_servers::{MCP_TOOL_NAME_DELIMITER, McpClient, McpState, SharedMcpState};
 
 // ── Wire types: mcp/list ────────────────────────────────────────────
 
@@ -773,7 +773,8 @@ pub(crate) async fn init_agent_mcp_pool(
         let Some(init_claim) = state.try_start_init() else {
             return;
         };
-        (state.configs.clone(), state.generation(), init_claim)
+        let generation = state.current_generation();
+        (state.configs.clone(), generation, init_claim)
     };
 
     let noop = xai_grok_session_events::EventWriter::noop();
@@ -797,32 +798,31 @@ pub(crate) async fn init_agent_mcp_pool(
         })
         .collect();
 
-    let mut state = mcp_state.lock().await;
-    finish_pool_init(&mut state, generation, init_claim, clients);
+    finish_pool_init(mcp_state, &generation, init_claim, clients).await;
 }
 
 /// A pool pass finishes only the generation it claimed: current installs and finishes, superseded discards its clients and cancels only if it still owns init.
-fn finish_pool_init(
-    state: &mut McpState,
-    generation: u64,
+async fn finish_pool_init(
+    mcp_state: &Arc<TokioMutex<McpState>>,
+    generation: &crate::session::mcp_servers::Generation,
     init_claim: crate::session::mcp_servers::InitClaimGuard,
     clients: xai_grok_mcp::owned_clients::OwnedClients,
 ) {
-    if state.generation() == generation {
-        state.owned_clients = clients;
-        state.finish_init(generation);
-        tracing::info!(
-            "Agent MCP pool: {} servers ready",
-            state.owned_clients.len()
-        );
-    } else {
-        tracing::info!(
-            stale = generation,
-            current = state.generation(),
-            "agent MCP pool superseded by a config change; discarding spawned clients"
-        );
-        state.cancel_init(&init_claim);
+    let finished = mcp_state
+        .write_if_current(generation, |state| {
+            state.owned_clients = clients;
+            state.finish_init();
+            state.complete_init();
+            tracing::info!(
+                "Agent MCP pool: {} servers ready",
+                state.owned_clients.len()
+            );
+        })
+        .await;
+    if finished.is_err() {
+        tracing::info!("agent MCP pool superseded by a config change; discarding spawned clients");
     }
+    drop(init_claim);
 }
 
 /// Call an MCP tool directly (outside the LLM tool-use loop).
@@ -2249,27 +2249,31 @@ mod tests {
     }
 
     /// A pool pass superseded by a config change during spawn must not install its clients, finish the successor's pass, or release the successor's claim.
-    #[test]
-    fn superseded_pool_pass_cannot_finish_the_successor() {
+    #[tokio::test]
+    async fn superseded_pool_pass_cannot_finish_the_successor() {
         fn stdio(name: &str) -> acp::McpServer {
             acp::McpServer::Stdio(acp::McpServerStdio::new(name.to_string(), "true"))
         }
 
-        let mut state = McpState::new(vec![stdio("old")]);
-        let init_claim = state.try_start_init().expect("first pass claims");
-        let generation = state.generation();
-
-        assert!(state.update_configs(vec![stdio("new")]));
-        let _successor_claim = state
-            .try_start_init()
-            .expect("successor claims after the config change");
+        let mcp_state = Arc::new(TokioMutex::new(McpState::new(vec![stdio("old")])));
+        let (init_claim, generation, _successor_claim) = {
+            let mut state = mcp_state.lock().await;
+            let init_claim = state.try_start_init().expect("first pass claims");
+            let generation = state.current_generation();
+            assert!(state.update_configs(vec![stdio("new")]));
+            let successor_claim = state
+                .try_start_init()
+                .expect("successor claims after the config change");
+            (init_claim, generation, successor_claim)
+        };
 
         let stale: xai_grok_mcp::owned_clients::OwnedClients =
             [("old".to_string(), Arc::new(McpClient::stub("old")))]
                 .into_iter()
                 .collect();
-        finish_pool_init(&mut state, generation, init_claim, stale);
+        finish_pool_init(&mcp_state, &generation, init_claim, stale).await;
 
+        let state = mcp_state.lock().await;
         assert!(
             state.owned_clients.is_empty(),
             "stale clients must be discarded"

@@ -246,6 +246,18 @@ pub(crate) fn parse_session_load_running_prompt_id(
         .and_then(|v| v.as_str())
         .map(String::from)
 }
+/// Parse the persistent-memory implementation pinned by the session actor.
+///
+/// `None` supports older shells that predate the metadata key. Those shells
+/// only support the legacy layout, so save call sites can safely default it.
+pub(crate) fn parse_session_memory_mode(
+    resp_meta: Option<&acp::Meta>,
+) -> Option<xai_grok_shell::config::MemoryMode> {
+    resp_meta
+        .and_then(|meta| meta.get(xai_grok_shell::session::MEMORY_MODE_META_KEY))
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
 pub(crate) fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)

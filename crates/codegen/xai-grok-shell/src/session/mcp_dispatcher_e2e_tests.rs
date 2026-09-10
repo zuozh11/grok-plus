@@ -29,7 +29,7 @@ use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SharedShutdownState,
     new_shutdown_state, run_dispatcher,
 };
-use crate::session::mcp_restart::RestartActions;
+use crate::session::mcp_restart::{Respawn, RestartActions};
 
 /// Past the 50 ms `collect_window` deadline so the window flushes.
 const PAST_WINDOW: Duration = Duration::from_millis(60);
@@ -38,7 +38,7 @@ const PAST_WINDOW: Duration = Duration::from_millis(60);
 /// A single instance can therefore observe the full loop from crash to drop to restart across multiple coalesce windows (flapping).
 struct E2eActions {
     configured: RefCell<HashSet<String>>,
-    outcomes: RefCell<HashMap<String, VecDeque<Result<(), String>>>>,
+    outcomes: RefCell<HashMap<String, VecDeque<Result<Respawn, String>>>>,
     respawn_calls: RefCell<Vec<String>>,
     pushes: RefCell<Vec<McpServerStatusPayload>>,
     /// Servers configured as HTTP/SSE (for `is_http_server_configured`).
@@ -86,7 +86,7 @@ impl E2eActions {
     }
     /// Queue one `respawn_stdio` outcome for `name`.
     /// Popped FIFO per attempt.
-    fn script(&self, name: &str, outcome: Result<(), String>) {
+    fn script(&self, name: &str, outcome: Result<Respawn, String>) {
         self.outcomes
             .borrow_mut()
             .entry(name.to_string())
@@ -119,7 +119,7 @@ impl RestartActions for E2eActions {
             .expect("ShutdownState mutex poisoned")
             .is_shutting_down(server)
     }
-    async fn respawn_stdio(&self, server: &str) -> Result<(), String> {
+    async fn respawn_stdio(&self, server: &str) -> Result<Respawn, String> {
         self.respawn_calls.borrow_mut().push(server.to_string());
         // Panic on an unscripted call: a test that under-scripts its outcomes is a test bug
         // `Err("not scripted")` would silently masquerade as a real respawn failure and pass the wrong assertion
@@ -133,7 +133,7 @@ impl RestartActions for E2eActions {
                 })
         };
         // Mirror production on success: re-insert the recovered client into `owned_clients`
-        if outcome.is_ok() {
+        if outcome == Ok(Respawn::Installed) {
             self.mcp_state
                 .lock()
                 .await
@@ -221,7 +221,7 @@ async fn e2e_crash_recovers_drops_client_then_restart_succeeds() {
         Arc::clone(&shutdown),
     ));
     actions.configure("svr");
-    actions.script("svr", Ok(()));
+    actions.script("svr", Ok(Respawn::Installed));
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
 
@@ -369,7 +369,7 @@ async fn e2e_handshake_failed_schedules_restart_without_dropping_client() {
         Arc::clone(&shutdown),
     ));
     actions.configure("svr");
-    actions.script("svr", Ok(()));
+    actions.script("svr", Ok(Respawn::Installed));
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
 
@@ -680,7 +680,7 @@ async fn e2e_burst_transport_closed_coalesces_to_single_restart() {
         Arc::clone(&shutdown),
     ));
     actions.configure("svr");
-    actions.script("svr", Ok(()));
+    actions.script("svr", Ok(Respawn::Installed));
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
 
@@ -741,7 +741,7 @@ async fn e2e_flapping_server_restarts_on_each_crash_cycle() {
     ));
     actions.configure("flappy");
     for _ in 0..3 {
-        actions.script("flappy", Ok(()));
+        actions.script("flappy", Ok(Respawn::Installed));
     }
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
@@ -824,7 +824,7 @@ async fn e2e_intermittently_healthy_recovers_after_transient_failure() {
     actions.configure("svr");
     // Attempt 1 fails (server still flapping), attempt 2 succeeds.
     actions.script("svr", Err("handshake timeout".into()));
-    actions.script("svr", Ok(()));
+    actions.script("svr", Ok(Respawn::Installed));
     let assert_actions = Rc::clone(&actions);
     let restart_actions: Rc<dyn RestartActions> = actions;
 

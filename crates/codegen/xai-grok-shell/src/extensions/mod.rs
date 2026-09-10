@@ -1,5 +1,7 @@
+pub mod agent_runtime;
 pub mod auth;
 pub(crate) mod auth_gate;
+pub(crate) mod background_task;
 pub mod billing;
 pub(crate) mod btw;
 pub mod bundle;

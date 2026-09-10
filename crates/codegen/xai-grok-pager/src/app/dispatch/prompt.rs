@@ -7,13 +7,13 @@ use super::auth::{
 use super::billing::is_credit_limit_error;
 use super::ctx::with_active_agent;
 use super::interject;
-use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
     maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
     retire_optimistic_echo,
 };
 use super::router::dispatch;
+use super::turn::finish_turn_view;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
 use crate::app::actions::{Action, DoctorFixTarget, Effect};
 use crate::app::agent::{AgentCommand, AgentId, AgentState};
@@ -1391,13 +1391,6 @@ pub(super) fn handle_prompt_response(
             "turn ended; client returning to idle",
         );
 
-        // Read before `finish_turn()` clears it; keys the pending stop-hook stash.
-        let ending_prompt_id = agent
-            .session
-            .current_prompt_id
-            .clone()
-            .or_else(|| response_pid.clone());
-
         agent.session.finish_turn(&mut agent.scrollback);
 
         // Insert the session event message (skip TurnCompleted for bash-mode, which has no agent turn)
@@ -1430,11 +1423,7 @@ pub(super) fn handle_prompt_response(
                 )
             }
         };
-        crate::app::turn_completion::push_turn_terminal_marker(
-            agent,
-            event,
-            ending_prompt_id.as_deref(),
-        );
+        crate::app::turn_completion::push_turn_terminal_marker(agent, event);
 
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {
@@ -1452,13 +1441,8 @@ pub(super) fn handle_prompt_response(
             _ => None,
         };
 
-        agent.mark_turn_finished(TurnEnd::Completed);
-        agent.activity_started_at = None;
-        agent.last_activity = None;
-
-        // Drain all queued permission requests: the turn is over, so any pending permissions are stale
-        // Send Cancelled to each
-        drain_permission_queue(agent);
+        let was_bash_turn = agent.bash_turn;
+        finish_turn_view(agent, TurnEnd::Completed);
 
         // Dismiss any active plan approval or review: the turn that produced it has completed, so the state is stale
         if let Some(mut pav) = agent.plan_approval_view.take() {
@@ -1466,17 +1450,6 @@ pub(super) fn handle_prompt_response(
             agent.plan_next_comment_id = pav.next_comment_id;
             agent.prompt.restore(pav.stashed_prompt);
             agent.line_viewer = None;
-        }
-
-        agent.cancel_turn_view = None;
-        agent.cancel_turn_buttons.clear();
-
-        // After a bash-mode turn, scroll to bottom so the user sees the command output
-        // Keep focus on the prompt for consistency with normal prompt behavior
-        let was_bash_turn = agent.bash_turn;
-        if agent.bash_turn {
-            agent.bash_turn = false;
-            agent.scrollback.goto_bottom();
         }
 
         // TurnComplete suppressed when the queue is non-empty (the badge fires only after the final queued turn); AgentError always fires

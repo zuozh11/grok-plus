@@ -16,7 +16,8 @@ use super::notifications::NotificationSender;
 use crate::agent::update_chunk_merge::{BufferingSettings, ReplayBuffer};
 use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
 use crate::extensions::notification::{
-    RetryState, SessionNotification as XaiSessionNotification, is_reauthable_failure,
+    HookAnnotationKind, RetryState, SessionNotification as XaiSessionNotification,
+    is_reauthable_failure,
 };
 use crate::sampling::error::map_sampling_err_to_acp;
 use crate::sampling::types::{ToolCallResponse, ToolDefinition};
@@ -141,16 +142,19 @@ mod prompt_queue;
 pub(super) use prompt_queue::QueueInputRequest;
 #[cfg(test)]
 use tool_calls::BridgeToolSuccess;
-#[path = "acp_session_impl/hooks_plugins.rs"]
-mod hooks_plugins;
 #[path = "acp_session_impl/mcp.rs"]
 mod mcp;
+#[path = "acp_session_impl/mcp_init.rs"]
+mod mcp_init;
+#[path = "acp_session_impl/parent_message.rs"]
+mod parent_message;
+use mcp_init::*;
+#[path = "acp_session_impl/hooks_plugins.rs"]
+mod hooks_plugins;
 #[path = "acp_session_impl/mcp_failed_reminder.rs"]
 mod mcp_failed_reminder;
 #[path = "acp_session_impl/model_switch.rs"]
 mod model_switch;
-#[path = "acp_session_impl/parent_message.rs"]
-mod parent_message;
 #[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
@@ -216,6 +220,8 @@ use turn_end_hooks::TurnEnd;
 #[path = "acp_session_impl/stop_gate.rs"]
 mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
+#[path = "acp_session_impl/background_tasks.rs"]
+mod background_tasks;
 #[path = "acp_session_impl/context_snapshot.rs"]
 mod context_snapshot;
 #[path = "acp_session_impl/recap.rs"]
@@ -852,7 +858,7 @@ pub(crate) struct SessionActor {
     /// Live rather than fixed at spawn, because a resident session outlives the client that created it.
     pub(crate) status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Shared models manager for etag-triggered refresh from response headers.
-    pub(crate) models_manager: crate::agent::models::ModelsManager,
+    pub(crate) models_manager: crate::agent::remote_config::ModelsManager,
     /// The system prompt's `Workspace Path` is set at build time via `AgentBuilder::with_prompt_working_directory()`.
     /// Set once at session spawn from the `prompt_display_cwd` parameter.
     /// Uses `OnceLock` for lock-free reads, a set-once guarantee, and `&self` mutability (SessionActor is behind `Arc`).
@@ -864,6 +870,10 @@ pub(crate) struct SessionActor {
     /// Seeded at spawn from the agent definition's harness.
     /// Refreshed by `handle_rebuild_agent_for_definition` so the bridge always agrees with the live harness gate.
     pub(crate) queue_exit_reminder_on_approved_exit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Live gate shared with the notification bridge (see `NotificationBridgeConfig::emit_local_background_tasks`).
+    /// Default `true`; flipped off when the session is gateway-backed so local
+    /// snapshots cannot last-wins-clear remote Running rows.
+    pub(crate) emit_local_background_tasks: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// First skill the current prompt activated via its slash-skill path, recorded as `skill.name` on the turn span.
     /// Reset at the start of each prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
@@ -981,6 +991,9 @@ pub(crate) struct SessionActor {
     pub(crate) mcp_startup_waits: McpStartupWaits,
     /// Background MCP init passes (handshakes and tool registration), aborted with the actor.
     pub(crate) mcp_init_tasks: std::cell::RefCell<tokio::task::JoinSet<()>>,
+    pub(crate) weak_self: std::sync::Weak<SessionActor>,
+    /// Where `&self` methods hand startup work so it outlives the caller's future but not the session.
+    pub(crate) startup_tasks: StartupTaskHandle,
     /// Extensions to notify at turn and session lifecycle edges. Built once by `session_extension_registry` at actor construction and frozen after.
     pub(crate) extension_registry: xai_agent_lifecycle::LocalExtensionRegistry,
     /// Local date last shown to the model.
@@ -1001,6 +1014,9 @@ pub(crate) struct SessionActor {
     /// Wrapped in `RefCell` for mid-session reload from `&self` methods.
     pub(crate) hook_registry:
         std::cell::RefCell<Option<Arc<xai_grok_hooks::discovery::HookRegistry>>>,
+    /// Disabled-hooks snapshot every dispatch filters on, so the actor never reads the file mid-turn.
+    /// Loaded at spawn and refreshed by hook reload and enable/disable; another session's toggle lands here at the next reload.
+    pub(crate) hook_disabled: std::cell::RefCell<Arc<xai_grok_hooks::trust::DisabledHooks>>,
     /// The turn's single end-of-turn hook report.
     /// Actor-scoped rather than turn-local because the gate runs on the turn task while a cancel runs on the command loop.
     pub(crate) turn_report: turn_report_slot::TurnReportSlot,
@@ -1238,7 +1254,8 @@ impl SessionActor {
         slash_commands::CommandAvailability {
             feedback: self.feedback_manager.is_enabled(),
             memory: self.memory.is_enabled() && memory_read_registered,
-            memory_configured: self.memory.backend_params.is_some(),
+            memory_configured: self.memory.backend_params.is_some()
+                || self.memory.configured_storage.is_some(),
             scheduler: tool_names.iter().any(|n| {
                 n == xai_grok_tools::implementations::grok_build::SCHEDULER_CREATE_TOOL_NAME
             }),
@@ -1534,7 +1551,14 @@ mod managed_gateway_descriptor_tests {
         let snapshot = Arc::new(std::sync::Mutex::new(
             crate::session::tool_index::ToolMetadataSnapshot::default(),
         ));
-        refresh_mcp_snapshot_for_test(bridge, mcp_state, managed, snapshot.clone()).await;
+        refresh_mcp_snapshot_for_test(
+            bridge,
+            mcp_state,
+            managed,
+            snapshot.clone(),
+            std::collections::HashMap::new(),
+        )
+        .await;
         let snapshot = snapshot.lock().unwrap();
         let names: std::collections::HashSet<&str> = snapshot
             .tools
@@ -1611,14 +1635,7 @@ mod managed_gateway_descriptor_tests {
                     std::collections::HashSet::from(["slack".to_string()]),
                 ),
             ]);
-        refresh_mcp_snapshot_for_test_with_disabled(
-            bridge,
-            mcp_state,
-            managed,
-            snapshot.clone(),
-            &disabled,
-        )
-        .await;
+        refresh_mcp_snapshot_for_test(bridge, mcp_state, managed, snapshot.clone(), disabled).await;
         let snapshot = snapshot.lock().unwrap();
         let names: std::collections::HashSet<&str> = snapshot
             .tools
@@ -2064,7 +2081,14 @@ mod managed_gateway_tool_tests {
         let snapshot = Arc::new(std::sync::Mutex::new(
             crate::session::tool_index::ToolMetadataSnapshot::default(),
         ));
-        refresh_mcp_snapshot_for_test(bridge.clone(), mcp_state, managed, snapshot.clone()).await;
+        refresh_mcp_snapshot_for_test(
+            bridge.clone(),
+            mcp_state,
+            managed,
+            snapshot.clone(),
+            std::collections::HashMap::new(),
+        )
+        .await;
         let catalog = bridge
             .read_resource::<xai_grok_tools::types::resources::ManagedGatewayToolCatalog>()
             .await
@@ -2136,12 +2160,12 @@ mod managed_gateway_tool_tests {
                     std::collections::HashSet::from(["slack".to_string()]),
                 ),
             ]);
-        refresh_mcp_snapshot_for_test_with_disabled(
+        refresh_mcp_snapshot_for_test(
             bridge.clone(),
             mcp_state,
             managed,
             snapshot.clone(),
-            &disabled,
+            disabled,
         )
         .await;
         let catalog = bridge

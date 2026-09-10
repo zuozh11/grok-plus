@@ -22,8 +22,9 @@ pub use layout::{DockLayout, MaxRows, SectionSlots, desired_height, is_show_all_
 pub const MAX_DOCK_ROWS: u16 = 8;
 
 const HEADER_INDENT: &str = " ";
-const ROW_INDENT: &str = "   ";
-const MORE_INDENT: &str = "     ";
+/// Same gutter as the header chevron, so a one-item section is not nested.
+const ROW_INDENT: &str = " ";
+const MORE_INDENT: &str = "   ";
 /// Lines the queue body's `#N` markers up with the column its header's title
 /// starts in. The header spends three columns on its chevron and the queue pane
 /// already insets its own content by two, so the dock adds the last one.
@@ -110,11 +111,10 @@ impl Section {
         }
     }
 
-    /// Subagents reuse the Tasks pane `[x]`; everything else keeps `[stop]`.
+    /// Every killable dock row paints `[stop]`, including subagents.
     pub fn kill_label(self) -> &'static str {
         match self {
-            Section::Subagents => crate::glyphs::ballot_x_button(),
-            Section::Tasks | Section::Watchers | Section::Queued => STOP_LABEL,
+            Section::Subagents | Section::Tasks | Section::Watchers | Section::Queued => STOP_LABEL,
         }
     }
 }
@@ -268,7 +268,7 @@ pub fn render(buf: &mut Buffer, area: Rect, theme: &Theme, data: &DockData) {
         if selected {
             highlight_row(buf, area, y, theme.bg_highlight);
         } else if hovered {
-            highlight_row(buf, area, y, theme.bg_hover);
+            highlight_row(buf, area, y, theme.row_hover_bg());
         }
     };
 
@@ -360,9 +360,7 @@ fn section_header(
 ) -> Line<'static> {
     let indent = if width > 1 { HEADER_INDENT } else { "" };
     let chevron = header_chevron(expanded);
-    let count_text = format!(" {count} ");
-    let used = indent.width() + chevron.width() + label.width() + count_text.width();
-    let fill = (width as usize).saturating_sub(used);
+    // Title and count only. A trailing rule made one-item sections look like a panel.
     Line::from(vec![
         Span::raw(indent),
         Span::styled(chevron, Style::default().fg(theme.gray)),
@@ -372,8 +370,7 @@ fn section_header(
                 .fg(theme.gray_bright)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(count_text, Style::default().fg(theme.gray)),
-        Span::styled("─".repeat(fill), Style::default().fg(theme.gray_dim)),
+        Span::styled(format!(" {count}"), Style::default().fg(theme.gray)),
     ])
 }
 
@@ -510,12 +507,12 @@ mod tests {
         (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
     }
 
+    fn header_prefix(expanded: bool, label: &str, count: usize) -> String {
+        format!("{HEADER_INDENT}{}{label} {count}", header_chevron(expanded))
+    }
+
     fn subagent_hover_actions() -> String {
-        format!(
-            "{}{}",
-            crate::glyphs::enlarge_button(),
-            crate::glyphs::ballot_x_button()
-        )
+        format!("{}{STOP_LABEL}", crate::glyphs::enlarge_button())
     }
 
     fn row(kind: &str, description: &str, meta: &str, killable: bool) -> DockRow {
@@ -593,7 +590,10 @@ mod tests {
         let area = Rect::new(0, 0, 40, 4);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
-        assert!(row_text(&buf, 0).starts_with(" ▾ Queued 2 ─"), "expanded");
+        assert!(
+            row_text(&buf, 0).starts_with(&header_prefix(true, "Queued", 2)),
+            "expanded"
+        );
         assert_eq!(
             queue_body_rect(area, &data),
             Rect::new(QUEUE_BODY_INDENT, 1, 40 - QUEUE_BODY_INDENT, 3),
@@ -611,7 +611,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
 
-        assert!(row_text(&buf, 0).starts_with(" ▾ Subagents 3 ─"));
+        assert!(row_text(&buf, 0).starts_with(&header_prefix(true, "Subagents", 3)));
         let first = row_text(&buf, 1);
         let diamond = crate::glyphs::diamond_filled();
         assert!(
@@ -637,9 +637,9 @@ mod tests {
             "no N-more line: {}",
             row_text(&buf, 3)
         );
-        assert!(row_text(&buf, 4).starts_with(" ▸ Tasks 1 ─"));
-        assert!(row_text(&buf, 5).starts_with(" ▸ Watchers 2 ─"));
-        assert!(row_text(&buf, 6).starts_with(" ▸ Queued 2 ─"));
+        assert!(row_text(&buf, 4).starts_with(&header_prefix(false, "Tasks", 1)));
+        assert!(row_text(&buf, 5).starts_with(&header_prefix(false, "Watchers", 2)));
+        assert!(row_text(&buf, 6).starts_with(&header_prefix(false, "Queued", 2)));
     }
 
     #[test]
@@ -654,10 +654,10 @@ mod tests {
         let area = Rect::new(0, 0, 80, 7);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
-        assert!(row_text(&buf, 0).starts_with(" ▸ Subagents 3 ─"));
-        assert!(row_text(&buf, 1).starts_with(" ▾ Tasks 1 ─"));
+        assert!(row_text(&buf, 0).starts_with(&header_prefix(false, "Subagents", 3)));
+        assert!(row_text(&buf, 1).starts_with(&header_prefix(true, "Tasks", 1)));
         assert!(row_text(&buf, 2).contains("Run cargo test -p theme (bg)"));
-        assert!(row_text(&buf, 3).starts_with(" ▾ Watchers 2 ─"));
+        assert!(row_text(&buf, 3).starts_with(&header_prefix(true, "Watchers", 2)));
         assert!(row_text(&buf, 4).contains("Monitor watch build log"));
         let loop_row = row_text(&buf, 5);
         assert!(loop_row.contains("Loop check CI status"), "{loop_row}");
@@ -679,7 +679,6 @@ mod tests {
             first.trim_end().ends_with(&subagent_hover_actions()),
             "{first}"
         );
-        assert!(!first.contains("[stop]"), "{first}");
         assert_eq!(buf[(0, 1)].bg, theme.bg_highlight);
 
         let mut data = sample();
@@ -691,8 +690,7 @@ mod tests {
             hovered.trim_end().ends_with(&subagent_hover_actions()),
             "{hovered}"
         );
-        assert!(!hovered.contains("[stop]"), "{hovered}");
-        assert_eq!(buf[(0, 1)].bg, theme.bg_hover);
+        assert_eq!(buf[(0, 1)].bg, theme.row_hover_bg());
         let kill = Section::Subagents.kill_label();
         assert_eq!(
             hovered_stop_button_rect(area, &data).map(|hit| hit.rect),
@@ -967,11 +965,15 @@ mod tests {
             DockLayout::new(&data.counts()).rows().len(),
             MAX_DOCK_ROWS as usize
         );
-        assert!(painted[0].starts_with(" ▾ Tasks 10 ─"), "{:?}", painted[0]);
+        assert!(
+            painted[0].starts_with(&header_prefix(true, "Tasks", 10)),
+            "{:?}",
+            painted[0]
+        );
         assert!(
             painted
                 .iter()
-                .any(|line| line.starts_with(" ▾ Watchers 2 ─")),
+                .any(|line| line.starts_with(&header_prefix(true, "Watchers", 2))),
             "a crowded section must not push another section's header off: {painted:#?}"
         );
         assert!(
@@ -1270,7 +1272,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
         let painted: Vec<String> = (0..area.height).map(|y| row_text(&buf, y)).collect();
-        assert!(painted[0].starts_with(" ▾ Tasks 10 ─"), "{:?}", painted[0]);
+        assert!(
+            painted[0].starts_with(&header_prefix(true, "Tasks", 10)),
+            "{:?}",
+            painted[0]
+        );
         assert!(
             painted[1].contains("task 4"),
             "the band starts at the scroll offset: {:?}",
@@ -1279,7 +1285,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|line| line.starts_with(" ▾ Watchers 2 ─")),
+                .any(|line| line.starts_with(&header_prefix(true, "Watchers", 2))),
             "scrolling one section cannot move another's header: {painted:#?}"
         );
         for watcher in ["watch 0", "watch 1"] {
@@ -1562,7 +1568,7 @@ mod tests {
     }
 
     #[test]
-    fn child_diamond_aligns_with_header_label() {
+    fn row_marker_shares_the_header_gutter() {
         let theme = Theme::tokyonight();
         let data = DockData {
             watchers: vec![row("Loop", "check CI status", "every 5m", true)],
@@ -1573,25 +1579,67 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
         assert_eq!(
-            HEADER_INDENT.width() + header_chevron(true).width(),
+            HEADER_INDENT.width(),
             ROW_INDENT.width(),
-            "row indent must place the diamond under the header label"
+            "row indent must place the marker under the header chevron"
         );
         let header = row_text(&buf, 0);
         let item = row_text(&buf, 1);
-        let label_at = header.find("Watchers").expect("header label");
+        let chevron = crate::glyphs::disclosure_open();
         let diamond = crate::glyphs::diamond_filled();
+        let chevron_at = header.find(chevron).expect("header chevron");
         let diamond_at = item.find(diamond).expect("row diamond");
-        let label_col = header[..label_at].width();
+        let chevron_col = header[..chevron_at].width();
         let diamond_col = item[..diamond_at].width();
         assert_eq!(
-            diamond_col, label_col,
-            "diamond col {diamond_col} vs label col {label_col}\nheader={header:?}\nitem={item:?}"
+            diamond_col, chevron_col,
+            "marker col {diamond_col} vs chevron col {chevron_col}\nheader={header:?}\nitem={item:?}"
         );
+        let label_at = header.find("Watchers").expect("header label");
         let row_label_at = item.find("Loop").expect("row label");
+        assert_eq!(
+            header[..label_at].width(),
+            item[..row_label_at].width(),
+            "row title should sit under the section title\nheader={header:?}\nitem={item:?}"
+        );
         assert!(
-            item[..row_label_at].width() > label_col,
-            "row content must sit farther right than its parent header"
+            !header.contains('─'),
+            "header must not paint a rule fill: {header:?}"
+        );
+    }
+
+    #[test]
+    fn one_item_section_has_no_header_rule() {
+        let theme = Theme::tokyonight();
+        let data = DockData {
+            tasks: vec![{
+                let mut task = row("Task", "Pull the new h", "1s", true);
+                task.spinning = true;
+                task
+            }],
+            tasks_expanded: true,
+            ..DockData::default()
+        };
+        let area = Rect::new(0, 0, 40, 2);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &theme, &data);
+        let header = row_text(&buf, 0);
+        assert_eq!(
+            header.trim_end(),
+            header_prefix(true, "Tasks", 1),
+            "header must be title and count only: {header:?}"
+        );
+        assert!(!header.contains('─'), "no rule fill: {header:?}");
+        let item = row_text(&buf, 1);
+        let spinner = crate::glyphs::dot_spinner_frames()[0];
+        let spinner_at = item.find(spinner).expect("row spinner");
+        let chevron_at = header
+            .find(crate::glyphs::disclosure_open())
+            .expect("header chevron");
+        assert_eq!(
+            header[..chevron_at].width(),
+            item[..spinner_at].width(),
+            "spinner must share the header gutter\nheader={header:?}\nitem={item:?}"
         );
     }
 
@@ -1812,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_paints_bg_hover_when_unfocused() {
+    fn hover_paints_terminal_row_hover_bg_when_unfocused() {
         let theme = Theme::tokyonight();
         let mut data = DockData {
             tasks: vec![row("Run", "cargo test", "1s", true)],
@@ -1823,8 +1871,13 @@ mod tests {
         let area = Rect::new(0, 0, 40, 2);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &theme, &data);
-        assert_eq!(buf[(0, 1)].bg, theme.bg_hover);
-        assert_ne!(buf[(0, 0)].bg, theme.bg_hover);
+        let hover_bg = theme.row_hover_bg();
+        assert_ne!(
+            hover_bg, theme.bg_hover,
+            "dock hover must match the terminal row blend, not the dropdown band"
+        );
+        assert_eq!(buf[(0, 1)].bg, hover_bg);
+        assert_ne!(buf[(0, 0)].bg, hover_bg);
 
         data.focused = true;
         data.cursor = 1;

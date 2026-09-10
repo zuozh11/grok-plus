@@ -40,7 +40,6 @@ use logo::{LogoTier, logo_line_count, render_logo, render_logo_tier};
 use menu::render_menu;
 pub(crate) use toast::paint_welcome_toast;
 use top_bar::render_top_bar;
-pub(crate) use top_bar::{LocationParts, location_parts, worktree_badge};
 #[cfg(feature = "local-workspace")]
 pub use workspace_mode::{
     WelcomeWorkspaceMode, WorkspaceModeHitRects, hit_test_workspace_mode,

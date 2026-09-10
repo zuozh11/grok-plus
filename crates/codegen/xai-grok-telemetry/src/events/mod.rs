@@ -1698,6 +1698,10 @@ pub struct StartupCompleted {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_manager_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_policy_auth_wait_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub managed_policy_config_sync_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub time_to_first_frame_ms: Option<u64>,
 }
 
@@ -1745,6 +1749,44 @@ pub struct EventLoopStall {
 #[derive(Serialize)]
 pub struct TermWriterBlocked {
     pub blocked_ms: u64,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptAckSurface {
+    Tui,
+    Headless,
+}
+
+/// What the client did with the unacknowledged prompt's text.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptAckDisposition {
+    RestoredToComposer,
+    MergedIntoDraft,
+    /// Nothing went back to a composer: skill / wire-block / bash prompts, a composer busy editing a
+    /// queued row, a draft that already carries images, or the headless runner.
+    NotRestorable,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptAckPromptKind {
+    Prompt,
+    Bash,
+    Skill,
+}
+
+/// The client sent `session/prompt` and saw no acknowledgment (queue broadcast,
+/// update, or response naming the prompt) within its limit, so it aborted the
+/// turn locally. `waited_ms` is the observed wait at the abort.
+#[derive(Serialize)]
+pub struct PromptAckTimeoutFired {
+    pub limit_ms: u64,
+    pub waited_ms: u64,
+    pub surface: PromptAckSurface,
+    pub disposition: PromptAckDisposition,
+    pub prompt_kind: PromptAckPromptKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -2732,7 +2774,11 @@ telemetry_event!(MultiAgentApply, "multi_agent_apply");
 telemetry_event!(MultiAgentDiscard, "multi_agent_discard");
 telemetry_event!(RepoChanges, "repo_changes");
 telemetry_event!(NonGitDecisionEvent, "non_git_decision");
-telemetry_event!(PromptLatency, "prompt_latency");
+telemetry_event!(
+    PromptLatency,
+    "prompt_latency",
+    external = crate::external::schema::map_prompt_latency
+);
 telemetry_event!(CancellationCompleted, "cancellation_completed");
 telemetry_event!(HeapThresholdCrossed, "heap_threshold_crossed");
 telemetry_event!(ProcessResourceUsage, "process_resource_usage");
@@ -2792,6 +2838,7 @@ telemetry_event!(PagerSlashCommand, "pager_slash_command");
 telemetry_event!(PlanSubmit, "plan_submit");
 telemetry_event!(EventLoopStall, "event_loop_stall");
 telemetry_event!(TermWriterBlocked, "term_writer_blocked");
+telemetry_event!(PromptAckTimeoutFired, "prompt_ack_timeout_fired");
 telemetry_event!(SuperGrokUpsellShown, "supergrok_upsell_shown");
 telemetry_event!(SuperGrokUpsellClicked, "supergrok_upsell_clicked");
 telemetry_event!(AnnouncementCtaShown, "announcement_cta_shown");

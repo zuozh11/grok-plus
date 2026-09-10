@@ -76,9 +76,9 @@ impl ChildControl for TestControl {
 #[derive(Default)]
 struct TestCompletionData;
 
-/// `(subagent_id, wake_agent_id, prompt, message_source, message_id)`.
 type WakeRun = (
     String,
+    xai_message_delivery_core::AttemptId,
     Option<String>,
     String,
     Option<ActiveAgentMessageSource>,
@@ -149,16 +149,24 @@ impl ChildRunner for TestRunner {
                 request,
                 cancellation,
                 reporter,
-                wake_agent_id,
-                wake_message_source,
-                wake_message_id,
+                attempt_id,
+                wake_origin,
                 queued_for,
                 session_running,
                 agent_address: _,
                 spawner_session_id,
             } = run;
+            let (wake_agent_id, wake_message_source, wake_message_id) = match wake_origin {
+                Some(origin) => (
+                    Some(origin.agent_id),
+                    Some(origin.source),
+                    Some(origin.message_id),
+                ),
+                None => (None, None, None),
+            };
             let _ = wake_runs.send((
                 request.id.clone(),
+                attempt_id,
                 wake_agent_id.clone(),
                 request.prompt.clone(),
                 wake_message_source,

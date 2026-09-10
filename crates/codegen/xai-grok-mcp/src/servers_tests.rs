@@ -321,18 +321,12 @@ fn test_mcp_state_new() {
     assert!(!state.is_initializing());
     assert!(!state.has_finished_init());
     assert!(matches!(state.init_progress(), InitProgress::NotStarted));
-    assert_eq!(state.generation, 0);
 }
 
 #[test]
 fn config_update_clears_stale_failure_records() {
     let mut state = McpState::new(vec![make_http_server("a", "https://old.example/a")]);
-    state.record_init_failure(
-        state.generation(),
-        "a",
-        false,
-        Some("old cause".to_string()),
-    );
+    state.record_init_failure("a", false, Some("old cause".to_string()));
     let diff = state
         .update_configs_diff(vec![make_http_server("a", "https://new.example/a")])
         .expect("configs changed");
@@ -343,12 +337,7 @@ fn config_update_clears_stale_failure_records() {
     );
 
     let mut state = McpState::new(vec![make_http_server("b", "https://old.example/b")]);
-    state.record_init_failure(
-        state.generation(),
-        "b",
-        false,
-        Some("old cause".to_string()),
-    );
+    state.record_init_failure("b", false, Some("old cause".to_string()));
     assert!(state.update_configs(vec![make_http_server("b", "https://new.example/b")]));
     assert!(state.init_failed.is_empty());
 }
@@ -357,21 +346,30 @@ fn config_update_clears_stale_failure_records() {
 fn test_mcp_state_update_configs_returns_false_when_unchanged() {
     let configs = vec![make_stdio_server("test", "/bin/test")];
     let mut state = McpState::new(configs.clone());
+    let generation = state.current_generation();
 
     let changed = state.update_configs(configs.clone());
     assert!(!changed);
-    assert_eq!(state.generation, 0);
+    assert!(
+        !generation.is_cancelled(),
+        "an unchanged set keeps its generation"
+    );
 }
 
 #[test]
 fn test_mcp_state_update_configs_returns_true_when_changed() {
     let configs = vec![make_stdio_server("test", "/bin/test")];
     let mut state = McpState::new(configs);
+    let generation = state.current_generation();
 
     let new_configs = vec![make_stdio_server("test2", "/bin/test2")];
     let changed = state.update_configs(new_configs);
     assert!(changed);
-    assert_eq!(state.generation, 1);
+    assert!(
+        generation.is_cancelled(),
+        "a changed set cancels its generation"
+    );
+    assert!(!state.current_generation().is_cancelled());
 }
 
 #[test]
@@ -379,8 +377,8 @@ fn test_mcp_state_update_configs_resets_initialized() {
     let configs = vec![make_stdio_server("test", "/bin/test")];
     let mut state = McpState::new(configs);
     let _owner = state.try_start_init().expect("claims init");
-    state.mark_servers_initializing(state.generation(), ["a".to_string()]);
-    state.finish_init(state.generation());
+    state.mark_servers_initializing(["a".to_string()]);
+    state.finish_init();
     assert!(state.has_finished_init());
     assert!(state.is_server_handshaking("a"));
 
@@ -424,7 +422,6 @@ async fn acp_servers_survive_update_configs_clear() {
 
     let changed = state.update_configs(vec![make_http_server("other", "http://other")]);
     assert!(changed);
-    assert_eq!(state.generation, 1);
     assert!(
         state.has_acp_servers(),
         "acp servers must survive update_configs"
@@ -534,7 +531,7 @@ fn test_mark_servers_initializing_clears_prior_init_failure() {
     state.init_failed.insert("a".to_string(), String::new());
     state.init_failed.insert("b".to_string(), String::new());
 
-    state.mark_servers_initializing(state.generation(), ["a".to_string()]);
+    state.mark_servers_initializing(["a".to_string()]);
 
     assert!(
         !state.init_failed.contains_key("a"),
@@ -550,7 +547,7 @@ fn test_mark_servers_initializing_clears_prior_init_failure() {
 fn test_record_init_failure_keeps_auth_and_init_failed_disjoint() {
     let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
 
-    state.record_init_failure(state.generation(), "auth-srv", true, None);
+    state.record_init_failure("auth-srv", true, None);
     assert!(state.auth_required.contains("auth-srv"));
     assert!(
         !state.init_failed.contains_key("auth-srv"),
@@ -558,7 +555,6 @@ fn test_record_init_failure_keeps_auth_and_init_failed_disjoint() {
     );
 
     state.record_init_failure(
-        state.generation(),
         "dead-srv",
         false,
         Some("tools/list failed: boom".to_string()),
@@ -569,38 +565,19 @@ fn test_record_init_failure_keeps_auth_and_init_failed_disjoint() {
         Some("tools/list failed: boom"),
     );
 
-    state.mark_servers_initializing(state.generation(), ["dead-srv".to_string()]);
+    state.mark_servers_initializing(["dead-srv".to_string()]);
     assert!(!state.init_failed.contains_key("dead-srv"));
 }
 
 #[test]
 fn test_clear_init_failed_removes_entry() {
     let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
-    state.record_init_failure(
-        state.generation(),
-        "dead-srv",
-        false,
-        Some("boom".to_string()),
-    );
+    state.record_init_failure("dead-srv", false, Some("boom".to_string()));
     assert!(state.init_failed.contains_key("dead-srv"));
 
     state.clear_init_failed("dead-srv");
     assert!(!state.init_failed.contains_key("dead-srv"));
     state.clear_init_failed("never-seen");
-}
-
-#[test]
-fn test_mcp_state_update_configs_increments_generation() {
-    let mut state = McpState::new(vec![]);
-
-    state.update_configs(vec![make_stdio_server("a", "/bin/a")]);
-    assert_eq!(state.generation, 1);
-
-    state.update_configs(vec![make_stdio_server("b", "/bin/b")]);
-    assert_eq!(state.generation, 2);
-
-    state.update_configs(vec![make_stdio_server("c", "/bin/c")]);
-    assert_eq!(state.generation, 3);
 }
 
 #[test]
@@ -669,7 +646,8 @@ fn test_try_start_init_prevents_concurrent_init() {
 fn test_try_start_init_fails_when_initialized() {
     let mut state = McpState::new(vec![make_stdio_server("test", "/bin/test")]);
     let _owner = state.try_start_init().expect("claims init");
-    state.finish_init(state.generation());
+    state.finish_init();
+    state.complete_init();
     assert!(state.is_initialized());
 
     assert!(state.try_start_init().is_none());
@@ -685,26 +663,14 @@ fn test_finish_init_clears_initializing() {
     assert!(state.is_initializing());
     assert!(!state.is_initialized());
 
-    state.finish_init(state.generation());
+    state.finish_init();
+    assert!(
+        state.is_initializing(),
+        "finish_init alone is not completion"
+    );
+    state.complete_init();
     assert!(!state.is_initializing());
     assert!(state.is_initialized());
-}
-
-#[test]
-fn test_cancel_init_clears_initializing() {
-    let mut state = McpState::new(vec![make_stdio_server("test", "/bin/test")]);
-
-    let stale = state.try_start_init().expect("claims init");
-    state.cancel_any_init();
-    let live = state.try_start_init().expect("re-claims init");
-    assert!(state.is_initializing());
-
-    assert!(!state.cancel_init(&stale), "a non-owner cancel is a no-op");
-    assert!(state.is_initializing());
-
-    assert!(state.cancel_init(&live));
-    assert!(!state.is_initializing());
-    assert!(!state.is_initialized());
 }
 
 #[test]
@@ -855,14 +821,16 @@ fn test_load_timeouts_startup_precedence() {
 fn test_update_configs_diff_no_change() {
     let configs = vec![make_stdio_server("test", "/bin/test")];
     let mut state = McpState::new(configs.clone());
+    let generation = state.current_generation();
     assert!(state.update_configs_diff(configs).is_none());
-    assert_eq!(state.generation, 0);
+    assert!(!generation.is_cancelled());
 }
 
 #[test]
 fn test_update_configs_diff_added() {
     let configs = vec![make_stdio_server("a", "/bin/a")];
     let mut state = McpState::new(configs);
+    let generation = state.current_generation();
 
     let new_configs = vec![
         make_stdio_server("a", "/bin/a"),
@@ -874,7 +842,7 @@ fn test_update_configs_diff_added() {
     assert_eq!(diff.retained, vec!["a"]);
     assert_eq!(diff.added, vec!["b"]);
     assert!(diff.removed.is_empty());
-    assert_eq!(state.generation, 1);
+    assert!(generation.is_cancelled());
 }
 
 #[test]
@@ -1737,6 +1705,8 @@ struct FakeMcpOptions {
     /// When set, `initialize` is rejected with an "Unauthorized" JSON-RPC
     /// error, for asserting that fallback errors keep their auth classification.
     init_unauthorized: bool,
+    /// When set, `tools/list` never answers: the server connects, then stalls.
+    list_tools_hangs: bool,
 }
 
 #[derive(Clone)]
@@ -1838,12 +1808,17 @@ async fn fake_handle_post(
                     .into_response(),
             }
         }
-        Some("tools/list") => axum::Json(serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id.clone(),
-            "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]},
-        }))
-        .into_response(),
+        Some("tools/list") => {
+            if state.options.list_tools_hangs {
+                std::future::pending::<()>().await;
+            }
+            axum::Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id.clone(),
+                "result": {"tools": [{"name": "echo", "inputSchema": {"type": "object"}}]},
+            }))
+            .into_response()
+        }
         Some("tools/call") => {
             let n = state.handles.calls.fetch_add(1, Ordering::Relaxed);
             state.handles.call_bodies.lock().push(req.clone());
@@ -2718,6 +2693,41 @@ async fn try_call_tool_mrtr_url_elicitation_with_state_only_round() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn server_that_connects_then_never_lists_tools_times_out_within_its_budget() {
+    let (url, _handles) = spawn_fake_mcp_with(
+        CallToolBehavior::HangThenOk { hang_ms: 0 },
+        FakeMcpOptions {
+            list_tools_hangs: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let client = fake_http_client_with_startup(&url, 2, 2);
+    let state = Arc::new(Mutex::new(McpState::new(vec![])));
+
+    let listed = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.get_tool_registrations(state),
+    )
+    .await
+    .expect("the client bounds the list itself, well inside the outer guard");
+
+    // The list budget is the handshake's worst case (2) plus a list window of at least the probe gate (10); a
+    // handshake timeout would report 2.
+    assert!(
+        matches!(
+            listed,
+            Err(McpError::Timeout {
+                timeout_secs: 12,
+                ..
+            })
+        ),
+        "a stalled tools/list must surface as the list budget's timeout, got {:?}",
+        listed.as_ref().map(Vec::len)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn try_call_tool_http_outer_timeout_resets_transport_no_retry() {
     let (url, handles) = spawn_fake_mcp(CallToolBehavior::HangThenOk { hang_ms: 3000 }).await;
     let client = fake_http_client(&url, 1);
@@ -3218,7 +3228,7 @@ fn is_auth_rejection_message_matches_auth_signals() {
 #[test]
 fn auth_required_records_as_auth_not_init_failed_and_maps_category() {
     let mut state = McpState::new(vec![]);
-    state.record_init_failure(state.generation(), "oauth-srv", true, None);
+    state.record_init_failure("oauth-srv", true, None);
     assert!(state.auth_required.contains("oauth-srv"));
     assert!(!state.init_failed.contains_key("oauth-srv"));
 
@@ -3571,7 +3581,7 @@ fn test_mcp_state_is_initialized_requires_empty_initializing_servers() {
     assert!(matches!(state.init_progress(), InitProgress::NotStarted));
 
     let _owner = state.try_start_init().expect("claims init");
-    state.mark_servers_initializing(state.generation(), ["a".to_string()]);
+    state.mark_servers_initializing(["a".to_string()]);
     assert!(!state.is_initialized());
     assert!(state.is_initializing());
     assert!(!state.has_finished_init());
@@ -3580,7 +3590,7 @@ fn test_mcp_state_is_initialized_requires_empty_initializing_servers() {
         InitProgress::Starting { .. }
     ));
 
-    state.finish_init(state.generation());
+    state.finish_init();
     assert!(
         !state.is_initialized(),
         "is_initialized() must wait for per-server handshakes"
@@ -3593,12 +3603,17 @@ fn test_mcp_state_is_initialized_requires_empty_initializing_servers() {
     assert!(state.is_server_handshaking("a"));
     assert_eq!(state.handshaking_servers_count(), 1);
 
-    state.mark_server_ready(state.generation(), "a");
+    state.mark_server_ready("a");
+    assert!(!state.is_server_handshaking("a"));
+    assert_eq!(state.handshaking_servers_count(), 0);
+    assert!(
+        !state.is_initialized() && state.is_initializing(),
+        "the last handshake landing is not completion"
+    );
+    state.complete_init();
     assert!(state.is_initialized());
     assert!(!state.is_initializing());
     assert!(state.has_finished_init());
-    assert!(!state.is_server_handshaking("a"));
-    assert_eq!(state.handshaking_servers_count(), 0);
 }
 
 #[test]
@@ -3611,52 +3626,23 @@ fn test_init_progress_state_machine_invariants() {
         "double try_start_init is rejected"
     );
 
-    state.mark_servers_initializing(state.generation(), ["a".to_string(), "b".to_string()]);
+    state.mark_servers_initializing(["a".to_string(), "b".to_string()]);
     assert_eq!(state.handshaking_servers_count(), 2);
-    state.mark_all_servers_ready(state.generation());
-    assert_eq!(state.handshaking_servers_count(), 0);
+    state.finish_init();
+    state.mark_server_ready("a");
+    state.mark_server_ready("b");
     assert!(
-        matches!(state.init_progress(), InitProgress::Starting { .. }),
-        "mark_all_servers_ready preserves the lifecycle variant"
+        !state.is_initialized() && state.is_initializing(),
+        "the last handshake landing is not completion; the pass completes after its final publication"
     );
-
-    state.finish_init(state.generation());
-    assert!(state.is_initialized());
-    assert!(matches!(
-        state.init_progress(),
-        InitProgress::Finished { .. }
-    ));
+    state.complete_init();
+    assert!(state.is_initialized() && !state.is_initializing());
 
     state.cancel_any_init();
     assert!(matches!(state.init_progress(), InitProgress::NotStarted));
     let _owner = state
         .try_start_init()
         .expect("cancel_any_init re-enables init");
-
-    let stale = state.generation();
-    assert!(state.update_configs(vec![make_stdio_server("c", "/bin/c")]));
-    let _owner = state.try_start_init().expect("claims init");
-    state.mark_servers_initializing(state.generation(), ["c".to_string()]);
-    state.mark_servers_initializing(stale, ["ghost".to_string()]);
-    assert!(
-        !state.is_server_handshaking("ghost"),
-        "a stale pass must not mark the successor generation's handshake set"
-    );
-    state.record_init_failure(stale, "ghost", false, Some("stale".to_string()));
-    assert!(
-        !state.has_failure_record("ghost"),
-        "a stale pass must not record failures onto the successor generation"
-    );
-    state.mark_server_ready(stale, "c");
-    assert!(
-        state.is_server_handshaking("c"),
-        "a stale pass must not conclude the successor generation's handshake"
-    );
-    state.finish_init(stale);
-    assert!(
-        !state.has_finished_init(),
-        "a stale pass must not finish the successor generation's init"
-    );
 }
 
 fn state_label(s: &ClientState) -> &'static str {
@@ -4420,7 +4406,7 @@ fn fresh_init_attempt_clears_unreachable_schedule() {
     let mut state = McpState::new(vec![make_stdio_server("srv", "/bin/srv")]);
     state.record_unreachable_failure_at("srv", "down".to_string(), std::time::Instant::now());
 
-    state.mark_servers_initializing(state.generation(), vec!["srv".to_string()]);
+    state.mark_servers_initializing(vec!["srv".to_string()]);
     assert!(!state.init_failed.contains_key("srv"));
     assert!(state.take_unreachable_retry_candidates().is_empty());
 }
@@ -4538,5 +4524,215 @@ async fn refused_connect_handshake_classifies_connect_phase() {
     assert!(
         err.is_connect_failure(),
         "a real refused-connect handshake must classify connect-phase: {err}"
+    );
+}
+
+#[test]
+fn has_client_is_identity_not_name() {
+    let mut state = McpState::new(vec![]);
+    let first = Arc::new(McpClient::stub("srv"));
+    let replacement = Arc::new(McpClient::stub("srv"));
+    state
+        .owned_clients
+        .insert("srv".to_owned(), Arc::clone(&first));
+    assert!(state.has_client("srv", &first));
+    state
+        .owned_clients
+        .insert("srv".to_owned(), Arc::clone(&replacement));
+    assert!(
+        !state.has_client("srv", &first),
+        "tools listed from a replaced client must not land under its successor's name"
+    );
+    assert!(state.has_client("srv", &replacement));
+}
+
+#[tokio::test]
+async fn slot_gate_lands_only_on_the_slot_the_caller_saw() {
+    use crate::shared_mcp_state::SharedMcpState;
+    let config = make_stdio_server("srv", "/bin/srv");
+    let state = Arc::new(Mutex::new(McpState::new(vec![config.clone()])));
+    let seen = state.lock().await.current_generation();
+    // Removed and re-added with identical bytes: the slot is empty and the config compares equal.
+    assert!(state.lock().await.update_configs(vec![]));
+    assert!(state.lock().await.update_configs(vec![config]));
+    assert_eq!(
+        state.write_if_slot_is("srv", None, &seen, |_| ()).await,
+        Err(Superseded),
+        "an install authorized before the change must not land after it"
+    );
+    let current = state.lock().await.current_generation();
+    let claim = state.lock().await.try_start_init().expect("claims init");
+    assert_eq!(
+        state.write_if_slot_is("srv", None, &current, |_| ()).await,
+        Err(Superseded),
+        "an empty slot a live pass may still fill is not the caller's to take"
+    );
+    drop(claim);
+    assert_eq!(
+        state.write_if_slot_is("srv", None, &current, |_| ()).await,
+        Ok(())
+    );
+    let first = Arc::new(McpClient::stub("srv"));
+    state
+        .lock()
+        .await
+        .owned_clients
+        .insert("srv".to_owned(), Arc::clone(&first));
+    assert_eq!(
+        state.write_if_slot_is("srv", None, &current, |_| ()).await,
+        Err(Superseded),
+        "an install into a slot another owner filled is refused"
+    );
+    assert_eq!(
+        state
+            .write_if_slot_is("srv", Some(&first), &current, |_| ())
+            .await,
+        Ok(()),
+        "a replacement lands while the slot still holds the client it saw"
+    );
+    state
+        .lock()
+        .await
+        .owned_clients
+        .insert("srv".to_owned(), Arc::new(McpClient::stub("srv")));
+    assert_eq!(
+        state
+            .write_if_slot_is("srv", Some(&first), &current, |_| ())
+            .await,
+        Err(Superseded),
+        "a replacement never lands over a newer owner's client"
+    );
+}
+
+#[test]
+fn init_is_reclaimable_when_the_pass_dies_after_finish_init() {
+    let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+    let claim = state.try_start_init().expect("claims init");
+    state.mark_servers_initializing(["a".to_owned()]);
+    state.finish_init();
+    assert!(
+        state.is_initializing() && state.try_start_init().is_none(),
+        "a live pass keeps init through finish_init"
+    );
+    drop(claim);
+    assert!(state.is_init_abandoned());
+    assert!(
+        state.try_start_init().is_some(),
+        "a dead pass with handshakes still marked is re-owned, not waited on"
+    );
+}
+
+#[test]
+fn restart_init_hands_the_caller_the_claim() {
+    let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+    let before = state.current_generation();
+    let claim = state.restart_init();
+    assert!(
+        before.is_cancelled() && state.is_initializing() && state.try_start_init().is_none(),
+        "waiters park instead of starting a pass of their own"
+    );
+    drop(claim);
+    assert!(state.try_start_init().is_some());
+}
+
+#[test]
+fn replaced_generation_names_what_replaced_it() {
+    let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+    let current = state.current_generation();
+    assert_eq!(current.replaced_by(), None);
+    drop(state.restart_init());
+    assert_eq!(current.replaced_by(), Some(Replacement::Rebuild));
+    let current = state.current_generation();
+    assert!(state.update_configs(vec![]));
+    assert_eq!(current.replaced_by(), Some(Replacement::ServerSetChange));
+}
+
+#[test]
+fn config_change_releases_every_init_claim() {
+    let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+    let claim = state.try_start_init().expect("claims init");
+    assert!(state.update_configs(vec![make_stdio_server("b", "/bin/b")]));
+    assert!(
+        !state.owns_init(&claim),
+        "a holder that awaited across the change must not act on its claim"
+    );
+}
+
+#[test]
+fn config_change_hands_its_successor_the_claim() {
+    let mut state = McpState::new(vec![make_stdio_server("a", "/bin/a")]);
+    let change = state
+        .change_configs(vec![make_stdio_server("b", "/bin/b")])
+        .expect("the set changed");
+    assert!(
+        state.owns_init(&change.claim) && state.try_start_init().is_none(),
+        "no waiter can start a pass between the change and its own"
+    );
+    assert!(
+        state.is_server_pending("b"),
+        "until the successor seeds its set, every server may still be handed a client"
+    );
+    assert!(
+        state
+            .change_configs(vec![make_stdio_server("b", "/bin/b")])
+            .is_none(),
+        "an unchanged set hands out nothing"
+    );
+}
+
+#[test]
+fn only_the_pass_s_own_servers_stay_pending_once_seeded() {
+    let mut state = McpState::new(vec![
+        make_stdio_server("a", "/bin/a"),
+        make_stdio_server("b", "/bin/b"),
+    ]);
+    state.auth_required.insert("a".to_owned());
+    let _claim = state.try_start_init().expect("claims init");
+    state.mark_servers_initializing(["a".to_owned()]);
+    assert!(
+        state.is_server_pending("a") && !state.is_server_pending("b"),
+        "a sign-in for a server the pass does not touch is not held up by it"
+    );
+    assert!(
+        !state.auth_required.contains("a"),
+        "a fresh attempt clears the prior sign-in verdict; a failure re-records it"
+    );
+    state.mark_server_ready("a");
+    assert!(!state.is_server_pending("a"));
+}
+
+#[tokio::test]
+async fn write_on_a_replaced_premise_is_refused() {
+    use crate::shared_mcp_state::SharedMcpState;
+    let state = Arc::new(Mutex::new(McpState::new(vec![])));
+    let stale = state.lock().await.current_generation();
+    assert!(
+        state
+            .lock()
+            .await
+            .update_configs(vec![make_stdio_server("c", "/bin/c")])
+    );
+    let claim = state.lock().await.try_start_init().expect("claims init");
+    assert!(
+        state
+            .lock()
+            .await
+            .update_configs(vec![make_stdio_server("d", "/bin/d")])
+    );
+
+    let stale_write = state
+        .write_if_current(&stale, |state| {
+            state.mark_servers_initializing(["ghost".to_owned()])
+        })
+        .await;
+    let released_claim = state
+        .write_if_owner(claim, |state, _claim| state.finish_init())
+        .await;
+    let current = state.lock().await;
+    assert_eq!(stale_write, Err(Superseded));
+    assert_eq!(released_claim, Err(Superseded));
+    assert!(
+        !current.is_server_handshaking("ghost") && !current.has_finished_init(),
+        "a stale generation and a released claim write nothing"
     );
 }

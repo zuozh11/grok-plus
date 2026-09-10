@@ -14,9 +14,10 @@ use super::attempt_runner::{
     run_one_turn_attempt, usage_is_incomplete,
 };
 use super::handle_request::{
-    CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, child_actor_query,
-    mark_child_usage_not_applied_with_fallback, reparent_surviving_child_tasks,
-    resolve_child_model, take_child_streaming_partial, take_child_turn_messages,
+    CHILD_ACTOR_ACK_TIMEOUT, PARENT_ACK_TIMEOUT, agent_memory_scope_for_mode,
+    child_actor_query, mark_child_usage_not_applied_with_fallback,
+    reparent_surviving_child_tasks, resolve_child_model, take_child_streaming_partial,
+    take_child_turn_messages,
 };
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway_with_receiver};
 use xai_grok_subagent_resolution::resolve_effective_overrides;
@@ -30,6 +31,18 @@ fn test_snapshot(
     result: &SubagentResult,
 ) -> SubagentSnapshot {
     terminal_snapshot(request, result, None, None, 0)
+}
+#[test]
+fn v2_disables_legacy_agent_memory_scope() {
+    let scope = Some(xai_grok_agent::config::MemoryScope::Project);
+    assert_eq!(
+            agent_memory_scope_for_mode(scope, crate::config::MemoryMode::V2),
+            None
+        );
+    assert_eq!(
+            agent_memory_scope_for_mode(scope, crate::config::MemoryMode::Legacy),
+            scope
+        );
 }
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {
@@ -87,7 +100,11 @@ async fn usage_ack_precedes_terminal_presentation() {
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     let mut request = auto_wake_test_request("usage-order");
     request.run_in_background = false;
-    let completion_data = ShellCompletionData::from_context(&ctx);
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
     completion_data.mark_spawned_notification_emitted();
     let result = SubagentResult {
         success: true,
@@ -216,14 +233,16 @@ fn wedged_child_handle() -> (
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         spawn_snapshot: crate::session::SpawnSnapshot {
             applied_tool_overrides: None,
+            memory_mode: None,
         },
         hunk_tracker_handle,
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         signals_handle,
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        status_line_enabled: std::sync::Arc::new(
-            std::sync::atomic::AtomicBool::new(false),
+        emit_local_background_tasks: std::sync::Arc::new(
+            std::sync::atomic::AtomicBool::new(true),
         ),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -2155,7 +2174,11 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
         ));
     assert!(result.cancelled);
     assert!(!result.success);
-    let completion_data = ShellCompletionData::from_context(&ctx);
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
     completion_data.mark_spawned_notification_emitted();
     let completion = ChildCompletion {
         snapshot: test_snapshot(&request, &result),
@@ -2378,7 +2401,11 @@ async fn startup_admission_timeout_is_failed_not_cancelled() {
         )
         .expect("parse meta");
     assert_eq!(meta.status, "failed");
-    let completion_data = ShellCompletionData::from_context(&ctx);
+    let completion_data = ShellCompletionData::from_context(
+        &ctx,
+        xai_message_delivery_core::AttemptId::mint(1),
+        None,
+    );
     completion_data.mark_spawned_notification_emitted();
     let completion = ChildCompletion {
         snapshot: test_snapshot(&request, &result),
@@ -2714,7 +2741,7 @@ async fn panicked_announced_foreground_child_emits_one_typed_finish() {
     request.run_in_background = false;
     let completion_data = ShellCompletionData {
         parent_cmd_tx: Some(parent_cmd_tx),
-        attempt_id: Some("at1.panic".to_owned()),
+        attempt_id: Some(xai_message_delivery_core::AttemptId::mint(0xface)),
         ..Default::default()
     };
     let worker_completion_data = completion_data.clone();
@@ -2768,7 +2795,7 @@ async fn panicked_announced_foreground_child_emits_one_typed_finish() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(finishes, vec![Some("at1.panic".to_owned())]);
+    assert_eq!(finishes, vec![Some("at1.face".to_owned())]);
 }
 #[tokio::test]
 async fn join_worker_task_drop_aborts_worker() {

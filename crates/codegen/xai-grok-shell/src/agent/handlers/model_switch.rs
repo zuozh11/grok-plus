@@ -2,10 +2,10 @@
 //! `set_session_model` enforces the `allowed_models` gate before delegating here.
 //! Internal callers (`new_session`, `load_session`) call `apply` directly.
 use crate::agent::config;
-use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
 use crate::agent::mvp_agent::{
     MvpAgent, agent_name_after_model_switch, harnesses_are_compatible, resolve_required_agent_type,
 };
+use crate::sampling::EffortTarget;
 use crate::session::SessionCommand;
 use agent_client_protocol::{self as acp};
 use tokio::sync::oneshot;

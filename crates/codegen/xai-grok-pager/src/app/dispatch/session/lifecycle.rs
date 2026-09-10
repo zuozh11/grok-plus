@@ -415,6 +415,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     }
     if stay_on_welcome {
         app.home_session_agent = Some(agent_id);
+        app.optimistic_home_husk = Some(agent_id);
     } else {
         switch_to_agent(app, agent_id, SwitchCause::New);
     }
@@ -768,6 +769,45 @@ pub(crate) fn abandon_unused_home_session(app: &mut AppView) -> Vec<Effect> {
     let Some(id) = app.home_session_agent.take() else {
         return vec![];
     };
+    abandon_agent_as_unused_husk(app, id)
+}
+/// Drop the revealed Welcome husk when LoadSession opens a different session.
+/// An empty `/new` is not this husk. A composer draft keeps it.
+pub(crate) fn abandon_unused_empty_for_load(
+    app: &mut AppView,
+    keep_session_id: &str,
+) -> Vec<Effect> {
+    let mut effects = abandon_unused_home_session(app);
+    let Some(id) = app.optimistic_home_husk else {
+        return effects;
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        app.optimistic_home_husk = None;
+        return effects;
+    };
+    if agent
+        .session
+        .session_id
+        .as_ref()
+        .is_some_and(|sid| sid.0.as_ref() == keep_session_id)
+    {
+        return effects;
+    }
+    if !crate::views::dashboard::row::is_empty_idle_top_level(agent)
+        || !agent.prompt.is_effectively_empty()
+    {
+        return effects;
+    }
+    effects.extend(abandon_agent_as_unused_husk(app, id));
+    effects
+}
+fn abandon_agent_as_unused_husk(app: &mut AppView, id: AgentId) -> Vec<Effect> {
+    if app.optimistic_home_husk == Some(id) {
+        app.optimistic_home_husk = None;
+    }
+    if app.home_session_agent == Some(id) {
+        app.home_session_agent = None;
+    }
     let (session_id, cwd) = app
         .agents
         .get(&id)
@@ -1540,6 +1580,9 @@ fn restore_dashboard_attach_after_orphan_remove(
 fn restore_orphan_create_draft_to_welcome(app: &mut AppView, agent_id: AgentId) {
     if app.home_session_agent == Some(agent_id) {
         app.home_session_agent = None;
+    }
+    if app.optimistic_home_husk == Some(agent_id) {
+        app.optimistic_home_husk = None;
     }
     if !matches!(app.active_view, ActiveView::Agent(id) if id == agent_id) {
         return;

@@ -78,6 +78,14 @@ impl SessionActor {
             xai_grok_telemetry::memory_telemetry::MemorySessionSummary {
                 session_id: self.session_info.id.to_string(),
                 memory_enabled: self.memory.is_enabled(),
+                memory_mode: match self.memory.mode() {
+                    Some(crate::config::MemoryMode::V2) => {
+                        xai_grok_telemetry::memory_telemetry::MemoryMode::V2
+                    }
+                    Some(crate::config::MemoryMode::Legacy) | None => {
+                        xai_grok_telemetry::memory_telemetry::MemoryMode::Legacy
+                    }
+                },
                 session_duration_secs: self.session_start.elapsed().as_secs(),
                 flush_count: telem.flush_count,
                 flush_success_count: telem.flush_success_count,
@@ -113,7 +121,9 @@ impl SessionActor {
         }
         let mut session_end_result = "disabled";
         let mut total_chunks_at_end = 0usize;
-        if let Some(storage) = self.memory.storage() {
+        if self.memory.uses_legacy_pipeline()
+            && let Some(storage) = self.memory.storage()
+        {
             let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
             let conversation = self.chat_state_handle.get_conversation().await;
             let result = crate::session::memory::hooks::on_session_end(
@@ -170,6 +180,9 @@ impl SessionActor {
         std::path::PathBuf,
         String,
     )> {
+        if !self.memory.uses_legacy_pipeline() {
+            return None;
+        }
         let storage = self.memory.storage()?;
         let workspace_dir = storage.workspace_dir();
         let lock = crate::session::memory::dream_lock::DreamLock::new(workspace_dir);
@@ -501,6 +514,14 @@ impl SessionActor {
         snapshot: Option<MemoryFlushSnapshot>,
     ) -> bool {
         use xai_grok_memory::flush::*;
+
+        if !self.memory.uses_legacy_pipeline() {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_FLUSH: legacy flush is disabled for this memory mode (trigger={trigger})"
+            );
+            return false;
+        }
 
         // Atomically acquire the flushing lock. If another flush is already running (idle timer, pre-compaction, or user-requested), skip.
         if !self.memory.try_acquire_flush_lock() {

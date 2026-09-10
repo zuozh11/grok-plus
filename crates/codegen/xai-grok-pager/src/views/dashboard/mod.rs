@@ -9,6 +9,8 @@
 //! - [`row`]: `DashboardRow`, `build_rows()`, classifiers, sort.
 //! - [`layout`]: pure rect computation.
 //! - [`render`]: `Widget`-style rendering routine.
+//! - [`chrome`]: the header row and the primary actions row above the list.
+//! - [`actions_focus`]: the keyboard cursor on the actions row and its `←`/`→` walk.
 //! - [`peek`]: peek panel state and rendering.
 //! - [`usage_modal`]: input routing for the dashboard-hosted `/usage` modal.
 //!
@@ -17,17 +19,22 @@
 //! Rows are rebuilt every render frame off `app.agents`; nothing is cached.
 //! The per-row sort key (state and last_change_at) is recomputed each frame; with single-digit agent counts in one pager process this is free.
 
+mod actions_focus;
+mod chrome;
 pub mod layout;
 pub mod peek;
 pub mod peek_tail;
 pub mod render;
 pub mod row;
 pub mod state;
+#[cfg(test)]
+mod test_support;
 mod usage_modal;
 
+pub use chrome::HeaderUpgradeCta;
 pub(crate) use render::render_dashboard;
 pub use render::{
-    DashboardOverlayChrome, HeaderUpgradeCta, popup_rect, render_dashboard_session_header,
+    DashboardOverlayChrome, popup_rect, render_dashboard_session_header,
     render_dashboard_session_overlay, render_popup_overlay,
 };
 pub use row::{

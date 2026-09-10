@@ -918,7 +918,6 @@ impl SessionActor {
                 source: compact_source.into(),
             },
             None,
-            None,
         )
         .await;
         let max_retries = 3u32;
@@ -1575,6 +1574,48 @@ impl SessionActor {
             )
             .await
         };
+        let v2_memory_context = if self.memory.is_enabled()
+            && self.memory.mode() == Some(crate::config::MemoryMode::V2)
+        {
+            if let Some(storage) = self.memory.storage() {
+                match tokio::task::spawn_blocking(move || {
+                    crate::session::helpers::memory_context::format_v2_memory_context(&storage)
+                })
+                .await
+                {
+                    Ok(Ok(context)) => Some(context),
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            %error,
+                            "MEMORY_COMPACTION_RECOVERY: failed to refresh v2 manifests"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            %error,
+                            "MEMORY_COMPACTION_RECOVERY: v2 manifest task failed"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let system_reminder = match (system_reminder, v2_memory_context) {
+            (Some(mut reminder), Some(context)) => {
+                reminder.push_str("\n\n");
+                reminder.push_str(&context);
+                Some(reminder)
+            }
+            (None, Some(context)) => Some(context),
+            (reminder, None) => reminder,
+        };
         let system_reminder = {
             let plan_path = {
                 let guard = self.plan_mode.lock();
@@ -1812,7 +1853,6 @@ impl SessionActor {
             xai_grok_hooks::event::HookPayload::PostCompact {
                 source: compact_source.into(),
             },
-            None,
             None,
         )
         .await;

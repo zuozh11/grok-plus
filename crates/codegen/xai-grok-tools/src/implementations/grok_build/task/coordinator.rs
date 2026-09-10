@@ -33,10 +33,10 @@ use super::coordinator_state::{
     background_if_caller_gone, completed_snapshot, sleep_until, workflow_outstanding,
 };
 use super::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageSource, AgentAddress, SpawnedSubagentRef,
-    SubagentCancelOutcome, SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent,
-    SubagentOutstandingReply, SubagentRegistryCounts, SubagentRequest, SubagentResult,
-    SubagentResumeLookup, SubagentResumeSource, SubagentValidateTypeOutcome,
+    ActiveAgentMessageOutcome, AgentAddress, SpawnedSubagentRef, SubagentCancelOutcome,
+    SubagentCancelTarget, SubagentDescribeOutcome, SubagentEvent, SubagentOutstandingReply,
+    SubagentRegistryCounts, SubagentRequest, SubagentResult, SubagentResumeLookup,
+    SubagentResumeSource, SubagentValidateTypeOutcome,
 };
 use active_message::{
     ActiveChildGeneration, ActiveMessageFuture, ActiveMessageLifecycle, SpawnReadyMessages,
@@ -49,7 +49,7 @@ pub use super::coordinator_state::{
     ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner, CompletionDisposition,
     CoordinatorConfig, LimitedSpawnOrigin, LocalBoxFuture, MAX_ACTIVE_MESSAGE_ADMISSIONS,
     MAX_ACTIVE_MESSAGE_ADMISSIONS_PER_CHILD, MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild,
-    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress,
+    SubagentLimitDecision, SubagentLimitNotice, SubagentLimitSink, SubagentProgress, WakeOrigin,
 };
 use queue::{QUEUED_REAP_INTERVAL, QueuedCaller, SpawnQueue, StartOrigin};
 
@@ -377,11 +377,6 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     query.timeout_ms,
                     query.respond_to,
                 );
-            }
-            SubagentEvent::SendActiveMessage(request) => {
-                let _ = request
-                    .respond_to
-                    .send(ActiveAgentMessageOutcome::Unsupported);
             }
             SubagentEvent::Cancel(request) => match request.target {
                 SubagentCancelTarget::SubagentId(id) => {
@@ -797,9 +792,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         origin: StartOrigin,
         agent_address: Option<AgentAddress>,
         spawner_session_id: Option<String>,
-        wake_agent_id: Option<String>,
-        wake_message_source: Option<ActiveAgentMessageSource>,
-        wake_message_id: Option<String>,
+        wake_origin: Option<WakeOrigin>,
         wake_of: Option<DisplacedCompletedChild>,
     ) {
         let id = request.id.clone();
@@ -850,6 +843,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         // Computed after the pending insert, so a non-workflow spawn counts
         // itself; max over launches gives a session's peak concurrency.
         let session_running = self.session_running_count(&request.parent_session_id);
+        let attempt_id = xai_message_delivery_core::AttemptId::mint(uuid::Uuid::new_v4().as_u128());
         let reporter = ChildReporter {
             subagent_id: id.clone(),
             tx: self.internal_tx.clone(),
@@ -861,9 +855,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     request,
                     cancellation,
                     reporter,
-                    wake_agent_id,
-                    wake_message_source,
-                    wake_message_id,
+                    attempt_id,
+                    wake_origin,
                     queued_for,
                     session_running,
                     agent_address,
@@ -1005,13 +998,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         self.begin_terminalization(
             id,
             ChildRunOutput {
-                result: SubagentResult {
-                    success: false,
-                    error: Some("Subagent runtime panicked".to_owned()),
-                    subagent_id: request.id.clone(),
-                    child_session_id: request.id,
-                    ..Default::default()
-                },
+                result: SubagentResult::failed(
+                    request.id.clone(),
+                    request.id,
+                    "Subagent runtime panicked",
+                ),
                 completion_data: R::CompletionData::default(),
                 snapshot_ref: None,
             },
@@ -1526,12 +1517,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 budget_ms = self.config.foreground_budget.as_millis() as u64,
                 "queued subagent exceeded await budget; auto-backgrounding (spawn stays queued)",
             );
-            let _ = result_tx.send(SubagentResult {
-                backgrounded: true,
-                subagent_id: queued.request.id.clone(),
-                child_session_id: queued.request.id.clone(),
-                ..Default::default()
-            });
+            let _ = result_tx.send(SubagentResult::backgrounded(
+                queued.request.id.clone(),
+                queued.request.id.clone(),
+            ));
         }
 
         let ids: Vec<_> = self.waiters.keys().cloned().collect();

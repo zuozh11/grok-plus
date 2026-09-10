@@ -20,9 +20,10 @@ const STATX_REQUIRED_MASK: u32 = 0x1003;
 const FILE_TYPE_MASK: u16 = 0o170000;
 #[cfg(target_os = "linux")]
 const FILE_TYPE_SYMLINK: u16 = 0o120000;
-#[cfg(target_os = "linux")]
+// Read only by the enforce-gated `verify_path_masked`.
+#[cfg(all(feature = "enforce", target_os = "linux"))]
 const FILE_TYPE_SOCKET: u16 = 0o140000;
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "enforce", target_os = "linux"))]
 const PERMISSION_MASK: u16 = 0o7777;
 
 #[cfg(target_os = "linux")]

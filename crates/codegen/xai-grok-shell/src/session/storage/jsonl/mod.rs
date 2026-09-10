@@ -1368,28 +1368,13 @@ impl StorageAdapter for JsonlStorageAdapter {
     async fn update_wake_start(
         &self,
         info: &Info,
-        prior: crate::session::persistence::WakeSummaryState,
-        attempt_id: String,
-        next_trace_turn: u64,
-        model_id: acp::ModelId,
-        agent_name: Option<String>,
-        reasoning_effort: Option<Option<xai_grok_sampling_types::ReasoningEffort>>,
+        start: crate::session::persistence::WakeStart,
         abort: tokio_util::sync::CancellationToken,
     ) -> io::Result<()> {
         let summary_path = self.summary_file(info);
         let lock_path = self.summary_lock_file(info);
         tokio::task::spawn_blocking(move || {
-            super::summary_write::update_wake_start_locked(
-                &summary_path,
-                &lock_path,
-                prior,
-                attempt_id,
-                next_trace_turn,
-                model_id,
-                agent_name,
-                reasoning_effort,
-                &abort,
-            )
+            super::summary_write::update_wake_start_locked(&summary_path, &lock_path, start, &abort)
         })
         .await
         .map_err(io::Error::other)?

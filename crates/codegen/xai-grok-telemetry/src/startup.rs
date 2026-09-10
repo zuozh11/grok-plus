@@ -97,6 +97,8 @@ span_table!(pub(crate) fn subphase_span(Subphase, parent) {
     ResolveConfig => "startup.bootstrap.resolve_config",
     RemoteSettings => "startup.bootstrap.remote_settings",
     ModelsManager => "startup.model_catalog.models_manager",
+    ManagedPolicyAuthWait => "startup.managed_policy.auth_wait",
+    ManagedPolicyConfigSync => "startup.managed_policy.config_sync",
 });
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr, serde::Serialize,
@@ -419,6 +421,8 @@ pub enum Subphase {
     ResolveConfig,
     RemoteSettings,
     ModelsManager,
+    ManagedPolicyAuthWait,
+    ManagedPolicyConfigSync,
 }
 #[derive(Clone, Copy, Default, serde::Serialize)]
 struct SubphaseTimings {
@@ -431,6 +435,8 @@ struct SubphaseTimings {
     resolve_config_ms: Option<u64>,
     remote_settings_ms: Option<u64>,
     models_manager_ms: Option<u64>,
+    managed_policy_auth_wait_ms: Option<u64>,
+    managed_policy_config_sync_ms: Option<u64>,
     time_to_first_frame_ms: Option<u64>,
     startup_total_ms: Option<u64>,
 }
@@ -444,6 +450,8 @@ static SUBPHASES: Mutex<SubphaseTimings> = Mutex::new(SubphaseTimings {
     resolve_config_ms: None,
     remote_settings_ms: None,
     models_manager_ms: None,
+    managed_policy_auth_wait_ms: None,
+    managed_policy_config_sync_ms: None,
     time_to_first_frame_ms: None,
     startup_total_ms: None,
 });
@@ -517,6 +525,8 @@ pub(crate) fn record_subphase(sp: Subphase, elapsed: Duration) {
         Subphase::ResolveConfig => &mut sub.resolve_config_ms,
         Subphase::RemoteSettings => &mut sub.remote_settings_ms,
         Subphase::ModelsManager => &mut sub.models_manager_ms,
+        Subphase::ManagedPolicyAuthWait => &mut sub.managed_policy_auth_wait_ms,
+        Subphase::ManagedPolicyConfigSync => &mut sub.managed_policy_config_sync_ms,
     };
     match sp {
         Subphase::InitProcess => {
@@ -625,6 +635,17 @@ pub(crate) fn is_active() -> bool {
 }
 pub fn current_phase_span() -> Option<tracing::Span> {
     current()?.lock().current_span.clone()
+}
+#[derive(Clone)]
+pub struct SpawnTraceContext {
+    pub parent: tracing::Span,
+}
+impl SpawnTraceContext {
+    pub fn new(startup_span: Option<tracing::Span>, request_span: tracing::Span) -> Self {
+        Self {
+            parent: startup_span.unwrap_or(request_span),
+        }
+    }
 }
 fn clear() {
     DONE.store(true, Ordering::Relaxed);
@@ -779,6 +800,8 @@ pub(crate) fn report_total(outcome: StartupOutcome) {
         resolve_config_ms: sub.resolve_config_ms,
         remote_settings_ms: sub.remote_settings_ms,
         models_manager_ms: sub.models_manager_ms,
+        managed_policy_auth_wait_ms: sub.managed_policy_auth_wait_ms,
+        managed_policy_config_sync_ms: sub.managed_policy_config_sync_ms,
         time_to_first_frame_ms: sub.time_to_first_frame_ms,
     };
     if let Ok(record) = serde_json::to_value(&event) {

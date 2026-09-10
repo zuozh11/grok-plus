@@ -48,6 +48,8 @@ pub struct ReadToolCallBlock {
     pub image_ref: Option<ScrollbackImageRef>,
     /// Non-text media kind (image, PDF).
     pub media_kind: Option<ReadMediaKind>,
+    /// Whether this ordinary read targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 impl ReadToolCallBlock {
@@ -64,7 +66,13 @@ impl ReadToolCallBlock {
             total_lines: None,
             image_ref: None,
             media_kind: None,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_line_range(mut self, range: LineRange) -> Self {

@@ -417,30 +417,6 @@ fn finish_child_with_result(coordinator: &mut TestCoordinator, id: &str, result:
 }
 
 #[tokio::test]
-async fn legacy_public_active_message_event_fails_closed() {
-    let (tx, rx) = mpsc::unbounded_channel();
-    let coordinator = SubagentCoordinator::new(rx, TestRunner, CoordinatorConfig::default());
-    let actor = tokio::spawn(coordinator.run());
-    let (respond_to, response) = oneshot::channel();
-    tx.send(
-        crate::implementations::grok_build::task::types::SubagentEvent::SendActiveMessage(
-            SubagentActiveMessageRequest {
-                request: ActiveAgentMessageRequest::try_new("child", "follow up").unwrap(),
-                parent_session_id: "parent".to_owned(),
-                respond_to,
-            },
-        ),
-    )
-    .unwrap();
-    assert_eq!(
-        ActiveAgentMessageOutcome::Unsupported,
-        response_outcome(response).await
-    );
-    drop(tx);
-    await_with_timeout(actor).await.unwrap();
-}
-
-#[tokio::test]
 async fn two_sequential_admissions_keep_child_open() {
     let (mut coordinator, command_tx, admission_tx, mut admissions) = fixture();
     insert_child(&mut coordinator, admission_tx, "child", "parent");
@@ -1157,9 +1133,7 @@ fn insert_queued(
             },
             agent_address: None,
             spawner_session_id: None,
-            wake_agent_id: None,
-            wake_message_source: None,
-            wake_message_id: None,
+            wake_origin: None,
             wake: None,
         });
     result_rx
@@ -1184,11 +1158,9 @@ async fn send_to_owned_queued_child_parks_until_started() {
             deadline: None,
         },
         queued.agent_address,
-        None,
-        None,
-        None,
-        None,
-        None,
+        queued.spawner_session_id,
+        queued.wake_origin,
+        queued.wake,
     );
     promote_pending(&mut coordinator, admission_tx, "child");
     let call = recv_with_timeout(&mut admissions).await;

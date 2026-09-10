@@ -30,6 +30,7 @@ use xai_grok_telemetry::startup::PendingStartup;
 
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::acp::spawn::{AgentShutdownGuard, spawn_grok_shell};
+use crate::app::prompt_ack::{PromptAckDeadlines, PromptAckWatch};
 use crate::app::worktree_session::{
     WorktreeSpec, create_worktree, new_worktree_id, note_orphaned_worktree,
     resume_session_into_worktree,
@@ -42,8 +43,10 @@ use crate::headless::reducer::{
 };
 
 mod ext_protocol;
+mod prompt_ack;
 mod reducer;
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
+use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
 
 mod cli;
 pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_rules_lenient};
@@ -1226,7 +1229,8 @@ pub async fn run_single_turn(
     let t_prompt = Instant::now();
     emitter.mark_prompt_started();
     let mut ttf_logged = false;
-    let prompt_fut = match prompt {
+    let ack_deadlines = PromptAckDeadlines::from_process_env();
+    let (prompt_fut, mut prompt_ack) = match prompt {
         Some(prompt) => {
             let prompt_blocks = prompt.into_content_blocks();
             let mut meta = serde_json::Map::new();
@@ -1240,11 +1244,20 @@ pub async fn run_single_turn(
                 "screenMode".to_string(),
                 serde_json::Value::String("headless".to_string()),
             );
+            // The shell echoes this id on every notification for the prompt; the acknowledgment watch keys on it
+            let prompt_id = uuid::Uuid::new_v4().to_string();
+            meta.insert(
+                "promptId".to_string(),
+                serde_json::Value::String(prompt_id.clone()),
+            );
             let request =
                 acp::PromptRequest::new(session_id.clone(), prompt_blocks).meta(Some(meta));
-            Some(Box::pin(acp_send(request, &acp_tx)))
+            (
+                Some(Box::pin(acp_send(request, &acp_tx))),
+                Some(PromptAckWatch::new(prompt_id, Instant::now())),
+            )
         }
-        None => None,
+        None => (None, None),
     };
     let mut prompt_result = None;
     // Tracked regardless of wait_for_background so the exit reaper always sees running work.
@@ -1253,6 +1266,8 @@ pub async fn run_single_turn(
     let mut prompt_done_at: Option<Instant> = None;
     // On mid-turn channel close, break (not bail) so the exit path still drains and reaps.
     let mut connection_closed = false;
+    // The shell never acknowledged the prompt; exit-path awaits on it must stay bounded.
+    let mut prompt_unacknowledged = false;
 
     if let Some(mut prompt_fut) = prompt_fut {
         loop {
@@ -1305,6 +1320,11 @@ pub async fn run_single_turn(
             } else {
                 Duration::from_secs(3600)
             };
+            // The branch is disabled once acknowledged; the far-future sleep is built but never polled
+            let ack_deadline = match prompt_ack.as_ref() {
+                Some(watch) => tokio::time::Instant::from_std(watch.hard_deadline(&ack_deadlines)),
+                None => tokio::time::Instant::now() + Duration::from_secs(3600),
+            };
 
             tokio::select! {
                 biased;
@@ -1314,8 +1334,14 @@ pub async fn run_single_turn(
                         connection_closed = true;
                         break;
                     };
+                    let msg = msg.boxed();
+                    if let Some(watch) = prompt_ack.as_ref()
+                        && headless_ack_signal(&msg, &session_id, watch.prompt_id()).is_some()
+                    {
+                        prompt_ack = None;
+                    }
                     handle_headless_acp_message(
-                        msg.boxed(),
+                        msg,
                         &mut emitter,
                         t_prompt,
                         &mut ttf_logged,
@@ -1325,6 +1351,7 @@ pub async fn run_single_turn(
                     );
                 }
                 res = &mut prompt_fut, if prompt_result.is_none() => {
+                    prompt_ack = None;
                     prompt_result = Some(res);
                     prompt_done_at = Some(Instant::now());
                     if !options.wait_for_background {
@@ -1358,6 +1385,22 @@ pub async fn run_single_turn(
                 {
                     // Wake to re-check the timeout at the top of the loop.
                 }
+                _ = tokio::time::sleep_until(ack_deadline), if prompt_ack.is_some() => {
+                    let Some(watch) = prompt_ack.take() else {
+                        unreachable!("branch precondition is `prompt_ack.is_some()`")
+                    };
+                    let err = abort_unacknowledged_prompt(
+                        &acp_tx,
+                        &session_id,
+                        watch.prompt_id(),
+                        watch.waited(Instant::now()),
+                        &ack_deadlines,
+                    )
+                    .await;
+                    prompt_result = Some(Err(err));
+                    prompt_unacknowledged = true;
+                    break;
+                }
             }
         }
 
@@ -1381,7 +1424,22 @@ pub async fn run_single_turn(
         }
     }
 
-    crate::unified_log::flush_blocking().await;
+    if prompt_unacknowledged {
+        // A shell that never took the prompt may never answer the log notification either; the fail-safe lines were written directly
+        if tokio::time::timeout(
+            prompt_ack::HEADLESS_ABORT_SEND_TIMEOUT,
+            crate::unified_log::flush_blocking(),
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!(
+                "headless: unified log flush timed out behind the unacknowledged prompt"
+            );
+        }
+    } else {
+        crate::unified_log::flush_blocking().await;
+    }
 
     if track_active {
         // Non-blocking flock so a slow/network ~/.grok can't hang exit.

@@ -540,7 +540,7 @@ pub enum SettingsFetch {
     /// Credential unambiguously rejected (401): the remote policy will never reach this leader, so the gate may open without waiting.
     Rejected,
     /// Transient/ambiguous (network, 5xx exhausted, 403/429/other 4xx, unparseable 2xx): outcome unknown.
-    /// Leave the gate closed (fail-closed), retry later.
+    /// A completed fetch that failed: the gate may open on local policy.
     Retry,
 }
 impl SettingsFetch {

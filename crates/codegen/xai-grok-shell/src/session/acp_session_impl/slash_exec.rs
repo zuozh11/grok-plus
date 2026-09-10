@@ -811,15 +811,17 @@ impl SessionActor {
                     "memory toggle via /memory slash command",
                 );
                 let msg = if enabled && !self.memory.is_enabled() {
-                    if let Some(ref params) = self.memory.backend_params {
-                        let storage = crate::session::memory::MemoryStorage::new(
-                            std::path::Path::new(&self.session_info.cwd),
-                            None,
-                        );
-                        if let Err(e) = storage.ensure_initialized() {
+                    if let Some(storage) = self.memory.configured_storage.clone() {
+                        if let Err(e) =
+                            crate::session::memory_state::initialize_memory_storage(storage.clone())
+                                .await
+                        {
                             tracing::warn!(error = %e, "failed to initialize memory storage on re-enable");
                             format!("Memory could not be enabled: {e}")
-                        } else {
+                        } else if self.memory.mode() == Some(crate::config::MemoryMode::V2) {
+                            *self.memory.storage.borrow_mut() = Some(storage);
+                            "Memory v2 enabled for this session.".to_owned()
+                        } else if let Some(ref params) = self.memory.backend_params {
                             let backend =
                                 crate::session::memory::MemoryBackendImpl::from_session_params(
                                     storage.clone(),
@@ -837,6 +839,9 @@ impl SessionActor {
                             }
                             *self.memory.storage.borrow_mut() = Some(storage);
                             "Memory enabled for this session.".to_owned()
+                        } else {
+                            "Memory cannot be enabled (legacy backend not configured for this session)."
+                                .to_owned()
                         }
                     } else {
                         "Memory cannot be enabled (not configured for this session).".to_owned()

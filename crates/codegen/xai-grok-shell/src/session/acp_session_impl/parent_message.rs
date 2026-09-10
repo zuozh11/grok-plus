@@ -5,6 +5,7 @@ use std::sync::Arc;
 use xai_grok_tools::implementations::grok_build::task::coordinator::ActiveMessageAdmission;
 use xai_grok_tools::implementations::grok_build::task::types::{
     ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
+    ActiveAgentMessageSource,
 };
 use xai_message_delivery_core::{
     DeliveryMessage, MessageDeliveryLifecycle, OwnedDelivery, TerminalCause, TerminalTarget,
@@ -12,9 +13,9 @@ use xai_message_delivery_core::{
 };
 
 #[derive(Clone)]
-pub(super) struct ParentAgentSource {
+pub(super) struct ParentMessageOrigin {
     sender_session_id: String,
-    principal: crate::session::message_delivery::ActiveMessagePrincipal,
+    source: ActiveAgentMessageSource,
 }
 
 #[derive(Clone)]
@@ -28,7 +29,7 @@ pub(super) struct PendingParentAgentMessage {
 type ParentMessageCompletion = oneshot::Sender<crate::session::commands::PromptTurnResult>;
 type ParentMessageLifecycle = MessageDeliveryLifecycle<
     String,
-    ParentAgentSource,
+    ParentMessageOrigin,
     PendingParentAgentMessage,
     ParentMessageCompletion,
     String,
@@ -36,7 +37,7 @@ type ParentMessageLifecycle = MessageDeliveryLifecycle<
 >;
 pub(super) type ParentOwnedDelivery = OwnedDelivery<
     String,
-    ParentAgentSource,
+    ParentMessageOrigin,
     PendingParentAgentMessage,
     ParentMessageCompletion,
     String,
@@ -66,7 +67,7 @@ impl MessageDeliveryState {
         cause: TerminalCause,
     ) -> xai_message_delivery_core::TerminalTransition<
         String,
-        ParentAgentSource,
+        ParentMessageOrigin,
         PendingParentAgentMessage,
         ParentMessageCompletion,
         String,
@@ -100,7 +101,7 @@ impl Drop for MessageDeliveryState {
 impl PendingParentAgentMessage {
     fn into_input(
         self,
-        source: ParentAgentSource,
+        origin: ParentMessageOrigin,
         respond_to: ParentMessageCompletion,
     ) -> InputItem {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
@@ -123,24 +124,18 @@ impl PendingParentAgentMessage {
             artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
-            verbatim: matches!(
-                source.principal,
-                crate::session::message_delivery::ActiveMessagePrincipal::Human
-            ),
+            verbatim: matches!(origin.source, ActiveAgentMessageSource::Human),
             json_schema: None,
             input_origin: InputOrigin::new(
-                if matches!(
-                    source.principal,
-                    crate::session::message_delivery::ActiveMessagePrincipal::Human
-                ) {
+                if matches!(origin.source, ActiveAgentMessageSource::Human) {
                     super::PromptOrigin::ParentHumanMessage {
                         message_id: self.message_id,
-                        sender_session_id: source.sender_session_id,
+                        sender_session_id: origin.sender_session_id,
                     }
                 } else {
                     super::PromptOrigin::ParentAgentMessage {
                         message_id: self.message_id,
-                        sender_session_id: source.sender_session_id,
+                        sender_session_id: origin.sender_session_id,
                     }
                 },
             ),
@@ -176,7 +171,6 @@ fn contains_queued_identity(state: &State, identity: &str) -> bool {
 impl SessionActor {
     pub(super) async fn admit_parent_agent_message(
         self: &Arc<Self>,
-        principal: crate::session::message_delivery::ActiveMessagePrincipal,
         delivery: ActiveAgentMessageDelivery,
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
         parent_telemetry_ctx: xai_grok_telemetry::TelemetryCtx,
@@ -185,9 +179,10 @@ impl SessionActor {
     ) {
         let message = delivery.message().clone();
         let requested = delivery.operation();
+        let source = delivery.source();
         self.admit_parent_agent_message_inner(
             Some(delivery),
-            principal,
+            source,
             message,
             requested,
             receipt_sink,
@@ -201,7 +196,7 @@ impl SessionActor {
     async fn admit_parent_agent_message_inner(
         self: &Arc<Self>,
         delivery: Option<ActiveAgentMessageDelivery>,
-        principal: crate::session::message_delivery::ActiveMessagePrincipal,
+        message_source: ActiveAgentMessageSource,
         message: ActiveAgentMessage,
         requested: ActiveAgentMessageOperation,
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
@@ -257,13 +252,13 @@ impl SessionActor {
             text: message.text,
             telemetry: telemetry.clone(),
         };
-        let source = ParentAgentSource {
+        let origin = ParentMessageOrigin {
             sender_session_id: message.sender_session_id,
-            principal,
+            source: message_source,
         };
         let commit = || match effective {
             ActiveAgentMessageOperation::Queue => {
-                let item = content.into_input(source, turn_result_tx);
+                let item = content.into_input(origin, turn_result_tx);
                 self.commit_queued_delivery(
                     &mut state,
                     super::prompt_queue::PreparedDelivery(item),
@@ -281,7 +276,7 @@ impl SessionActor {
                     .lifecycle
                     .admit_pending(
                         binding,
-                        DeliveryMessage::new(message.message_id, source, content),
+                        DeliveryMessage::new(message.message_id, origin, content),
                         turn_result_tx,
                     )
                     .unwrap_or_else(|_| unreachable!("live identity checked under state lock"));
@@ -431,11 +426,11 @@ impl SessionActor {
                 }
             };
             let (_, message, completion) = owned.into_parts();
-            let (_, source, content) = message.into_parts();
+            let (_, origin, content) = message.into_parts();
             content.telemetry.record_fallback(fallback_reason);
             state
                 .pending_inputs
-                .push_back(content.into_input(source, completion));
+                .push_back(content.into_input(origin, completion));
         }
         (transition.completions, has_fallbacks)
     }
@@ -470,6 +465,7 @@ impl SessionActor {
     async fn admit_parent_agent_message_for_test(
         self: &Arc<Self>,
         message: ActiveAgentMessage,
+        source: ActiveAgentMessageSource,
         operation: ActiveAgentMessageOperation,
         receipt_sink: mpsc::Sender<crate::agent::subagent::PromptTurnReceipt>,
         respond_to: oneshot::Sender<ActiveMessageAdmission>,
@@ -477,7 +473,7 @@ impl SessionActor {
     ) {
         self.admit_parent_agent_message_inner(
             None,
-            crate::session::message_delivery::ActiveMessagePrincipal::Agent,
+            source,
             message,
             operation,
             receipt_sink,

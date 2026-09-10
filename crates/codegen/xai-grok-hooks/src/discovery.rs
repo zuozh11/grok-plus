@@ -23,14 +23,16 @@ impl HookRegistry {
         self.hooks.get(&event).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Returns true when any enabled hook is registered for `event` or its alias spelling (reads the disabled-hooks file for non-managed specs).
-    /// Managed-policy hooks always count as enabled (not user-disableable), matching `dispatcher::eligible_or_record_skip`.
-    pub fn has_enabled_hooks_for_canonical(&self, event: HookEventName) -> bool {
-        let disabled = crate::trust::DisabledHooks::load();
+    /// True when any hook for `event` (or its alias spelling) passes the disable rule against `disabled`.
+    pub fn has_enabled_hooks_for_canonical(
+        &self,
+        event: HookEventName,
+        disabled: &crate::trust::DisabledHooks,
+    ) -> bool {
         let enabled = |specs: &[HookSpec]| {
             specs
                 .iter()
-                .any(|s| s.is_managed_policy() || (s.enabled && !disabled.contains(&s.name)))
+                .any(|s| !crate::dispatcher::is_disabled(s, disabled))
         };
         let canonical = event.canonical();
         enabled(self.hooks_for(canonical))
@@ -792,8 +794,9 @@ mod tests {
         };
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![spec.clone()]);
+        let disabled = crate::trust::DisabledHooks::from_names([spec.name.clone()]);
         assert!(
-            registry.has_enabled_hooks_for_canonical(HookEventName::Stop),
+            registry.has_enabled_hooks_for_canonical(HookEventName::Stop, &disabled),
             "managed-policy hook must count as enabled"
         );
 
@@ -801,7 +804,7 @@ mod tests {
         let mut registry = HookRegistry::default();
         registry.append_specs(vec![spec]);
         assert!(
-            !registry.has_enabled_hooks_for_canonical(HookEventName::Stop),
+            !registry.has_enabled_hooks_for_canonical(HookEventName::Stop, &disabled),
             "a disabled file hook must not count"
         );
     }

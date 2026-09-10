@@ -152,9 +152,13 @@ fn memory_config_legacy_wrapper_matches_tri_state_override() {
 #[test]
 fn memory_config_from_toml() {
     without_grok_memory(|| {
-        let config: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
+        let config: toml::Value = toml::from_str(
+                "[memory]\nenabled = true\nmode = \"v2\"",
+            )
+            .unwrap();
         let mem = MemoryConfig::resolve(false, false, &config, None);
         assert!(mem.enabled);
+        assert_eq!(mem.mode, crate::config::MemoryMode::V2);
     });
 }
 #[test]
@@ -164,11 +168,20 @@ fn public_memory_config_deserializes_with_skipped_defaults() {
         )
         .unwrap();
     assert!(config.enabled);
+    assert_eq!(config.mode, crate::config::MemoryMode::Legacy);
     assert_eq!(config.search.max_results, 9);
     assert_eq!(config.flush, MemoryFlushConfig::default());
     assert_eq!(config.pruning, PruningConfig::default());
     assert_eq!(config.root_dir_override, None);
     assert!(!config.flat_memory_root);
+}
+#[test]
+fn invalid_memory_mode_is_rejected() {
+    let invalid: toml::Value = toml::from_str(
+            "[memory]\nenabled = true\nmode = \"unknown\"",
+        )
+        .unwrap();
+    assert!(crate::agent::config::Config::new_from_toml_cfg(&invalid).is_err());
 }
 #[test]
 fn memory_config_deserializes_through_config() {
@@ -3546,7 +3559,7 @@ fn apply_requirements_allowed_models_clamps_catalog_and_names_source() {
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = [\"grok-4\"]\n");
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
     assert!(
             catalog["grok-4"].info.user_selectable,
             "signed allowlist member must stay selectable"
@@ -3555,7 +3568,8 @@ fn apply_requirements_allowed_models_clamps_catalog_and_names_source() {
             !catalog["grok-3"].info.user_selectable,
             "models outside the signed set must not be selectable"
         );
-    let err = crate::agent::models::validate_selectable(&cfg, &catalog).unwrap_err();
+    let err = crate::agent::remote_config::validate_selectable(&cfg, &catalog)
+        .unwrap_err();
     assert!(
             err.contains("administrator"),
             "fail-closed error must tell the user to contact their administrator: {err}"
@@ -3590,7 +3604,7 @@ fn apply_requirements_allowed_models_ignores_user_catalog_key() {
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = [\"grok-4*\"]\n");
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
     assert!(
             catalog["grok-4"].info.user_selectable,
             "routing slug grok-4 matches grok-4*"
@@ -3620,7 +3634,7 @@ fn apply_requirements_malformed_allowed_models_fail_closes() {
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = \"grok-4\"\n");
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
     assert!(
             !catalog["grok-4"].info.user_selectable,
             "malformed fleet pin must mark nothing selectable, not keep the user list"
@@ -3632,7 +3646,8 @@ fn apply_requirements_malformed_allowed_models_fail_closes() {
             ),
             "unreadable pin must be FailClosed, not a reserved glob"
         );
-    let err = crate::agent::models::validate_selectable(&cfg, &catalog).unwrap_err();
+    let err = crate::agent::remote_config::validate_selectable(&cfg, &catalog)
+        .unwrap_err();
     assert!(
             err.contains("administrator"),
             "malformed pin must tell the user to contact their administrator: {err}"
@@ -3661,7 +3676,7 @@ fn apply_requirements_allowed_models_empty_array_is_unrestricted() {
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = []\n");
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
     assert!(
             catalog["grok-3"].info.user_selectable && catalog["grok-4"].info.user_selectable,
             "empty fleet array must not restrict"
@@ -3698,7 +3713,7 @@ fn apply_requirements_allowed_models_replaces_user_list() {
         .unwrap();
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = [\"grok-4\"]\n");
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
     assert!(catalog["grok-4"].info.user_selectable);
     assert!(
             !catalog["grok-3"].info.user_selectable,
@@ -3725,8 +3740,9 @@ fn validate_selectable_rejects_dash_m_outside_fleet_pin() {
     let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
     pin_allowed_models(&mut cfg, "[models]\nallowed_models = [\"grok-4\"]\n");
     cfg.default_model_override = Some("grok-3".into());
-    let catalog = crate::agent::models::resolve_model_catalog(&cfg, None);
-    let err = crate::agent::models::validate_selectable(&cfg, &catalog).unwrap_err();
+    let catalog = crate::agent::remote_config::resolve_model_catalog(&cfg, None);
+    let err = crate::agent::remote_config::validate_selectable(&cfg, &catalog)
+        .unwrap_err();
     assert!(err.contains("-m flag"), "must name the -m source: {err}");
     assert!(err.contains("administrator"), "fleet -m deny must be admin language: {err}");
     assert!(

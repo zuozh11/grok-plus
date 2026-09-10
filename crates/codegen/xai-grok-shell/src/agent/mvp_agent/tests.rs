@@ -1,4 +1,5 @@
 use super::*;
+use crate::extensions::code_nav::CodeNavEligibility;
 /// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
 fn jwt_with_tier(tier: u64) -> String {
     use base64::Engine;
@@ -414,9 +415,9 @@ fn retained_resources_with_turn_number_is_not_empty() {
 async fn child_attempt_turn_numbers_start_at_zero_and_advance_monotonically() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("child-attempt-turns");
-    assert_eq!(agent.allocate_subagent_turn_number(&sid), 0);
-    assert_eq!(agent.allocate_subagent_turn_number(&sid), 1);
-    assert_eq!(agent.allocate_subagent_turn_number(&sid), 2);
+    assert_eq!(agent.allocate_turn_number(&sid), 0);
+    assert_eq!(agent.allocate_turn_number(&sid), 1);
+    assert_eq!(agent.allocate_turn_number(&sid), 2);
     assert_eq!(agent.session_turn_number(&sid), Some(3));
     agent.release_subagent_turn_number(&sid);
     assert_eq!(agent.session_turn_number(&sid), None);
@@ -426,7 +427,7 @@ async fn releasing_subagent_turn_number_keeps_resident_session() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("child-turn-resident");
     agent.insert_resident(&sid, make_test_handle("test-model", false, None));
-    assert_eq!(agent.allocate_subagent_turn_number(&sid), 0);
+    assert_eq!(agent.allocate_turn_number(&sid), 0);
     agent.release_subagent_turn_number(&sid);
     assert_eq!(agent.session_turn_number(&sid), None);
     assert!(agent.is_resident(&sid));
@@ -443,7 +444,7 @@ async fn first_subagent_turn_allocation_does_not_walk_the_sessions_index() {
     let _reset = Reset;
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("child-with-no-live-counter");
-    assert_eq!(agent.allocate_subagent_turn_number(&sid), 0);
+    assert_eq!(agent.allocate_turn_number(&sid), 0);
     assert_eq!(agent.session_turn_number(&sid), Some(1));
 }
 /// Agent-side upload path: each drained harness turn takes a distinct, monotonic turn number that CONTINUES past the user turn.
@@ -907,6 +908,7 @@ fn read_session_or_init_meta_str_falls_back_to_init_meta() {
 }
 #[test]
 fn parse_session_plugin_dirs_filters_and_dedupes() {
+    use crate::session::session_create_prefetch::parse_session_plugin_dirs;
     let tmp = tempfile::tempdir().unwrap();
     let dir = dunce::canonicalize(tmp.path()).unwrap().join("plugin");
     std::fs::create_dir(&dir).unwrap();
@@ -1204,12 +1206,14 @@ fn make_test_handle(
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
         spawn_snapshot: crate::session::SpawnSnapshot {
             applied_tool_overrides: None,
+            memory_mode: None,
         },
         hunk_tracker_handle,
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -1351,7 +1355,7 @@ async fn model_state_prefers_session_reasoning_effort_over_global() {
 #[tokio::test]
 async fn apply_supported_effort_assigns_only_when_supported() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
+    use crate::sampling::EffortTarget;
     use xai_grok_sampling_types::ReasoningEffort;
     let agent = build_minimal_agent_for_tests();
     let mut supported = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
@@ -1397,7 +1401,7 @@ async fn apply_supported_effort_assigns_only_when_supported() {
 #[tokio::test]
 async fn an_effort_that_names_its_own_model_switches_the_id() {
     use crate::agent::config::{EndpointsConfig, ModelEntry, ModelVariant};
-    use crate::agent::mvp_agent::reasoning_effort::EffortTarget;
+    use crate::sampling::EffortTarget;
     use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
     let agent = build_minimal_agent_for_tests();
     let option = |value: ReasoningEffort, default: bool| ReasoningEffortOption {
@@ -1535,9 +1539,8 @@ fn split_new_session_effort_routes_hint_to_one_slot() {
 #[tokio::test]
 async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_unsupported() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
-    use crate::agent::mvp_agent::reasoning_effort::{
-        EffortTarget, NewSessionEffort, split_new_session_effort,
-    };
+    use crate::agent::mvp_agent::reasoning_effort::{NewSessionEffort, split_new_session_effort};
+    use crate::sampling::EffortTarget;
     use xai_grok_sampling_types::{
         REASONING_EFFORT_META_KEY, ReasoningEffort, parse_reasoning_effort_meta,
         reasoning_effort_meta_value,
@@ -1589,8 +1592,9 @@ async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_u
 async fn new_session_without_meta_keeps_current_effort_over_catalog_default() {
     use crate::agent::config::{EndpointsConfig, ModelEntry};
     use crate::agent::mvp_agent::reasoning_effort::{
-        EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
+        NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
     };
+    use crate::sampling::EffortTarget;
     use xai_grok_sampling_types::ReasoningEffort;
     let agent = build_minimal_agent_for_tests();
     let mut supported = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
@@ -2194,7 +2198,7 @@ fn build_minimal_agent_for_tests() -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config")
 }
 fn session_usage_request(session_id: &str) -> acp::ExtRequest {
     acp::ExtRequest::new(
@@ -2228,6 +2232,23 @@ async fn session_usage_dead_chat_state_actor_fails_closed() {
             .expect_err("dead chat-state actor");
     assert_eq!(err.code, acp::Error::internal_error().code);
 }
+#[tokio::test(flavor = "current_thread")]
+async fn session_meta_publishes_the_sessions_spawn_pins() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("memory-mode-sess");
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.info.id = sid.clone();
+    handle.spawn_snapshot.memory_mode = Some(crate::config::MemoryMode::V2);
+    agent.insert_resident(&sid, handle);
+    let model_state = agent.model_state(Some(&sid));
+    let mut meta = serde_json::Map::new();
+    agent.insert_session_config_meta(&mut meta, &sid, "/tmp".to_string(), None, &model_state);
+    assert_eq!(
+        meta.get(crate::session::MEMORY_MODE_META_KEY),
+        Some(&serde_json::json!("v2")),
+        "session meta must carry the handle's pinned memory mode"
+    );
+}
 fn build_agent_with_auth(auth: xai_grok_login::GrokAuth) -> MvpAgent {
     use crate::agent::config::Config as AgentConfig;
     use xai_grok_login::{AuthManager, GrokComConfig};
@@ -2238,7 +2259,7 @@ fn build_agent_with_auth(auth: xai_grok_login::GrokAuth) -> MvpAgent {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config")
 }
 fn make_trace_card_eligible(agent: &MvpAgent) {
     let mut cfg = agent.cfg.borrow_mut();
@@ -2840,7 +2861,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
     cfg.plugins.cli_plugin_dirs = vec![plugin_dir.path().to_path_buf()];
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config");
     assert!(
         agent.plugin_registry_handle.snapshot().is_none(),
         "snapshot must start empty (boot discovery deferred past initialize)"
@@ -3022,7 +3043,7 @@ async fn headless_residents_are_excluded_from_snapshots_and_deltas() {
         std::sync::Arc::new(AuthManager::new(temp_dir.path(), GrokComConfig::default()));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
-    let agent = MvpAgent::new(gateway, &AgentConfig::default(), auth_manager, None)
+    let agent = MvpAgent::new(gateway, &AgentConfig::default(), auth_manager, None, None)
         .expect("valid test config");
     let sid = acp::SessionId::new("sess-headless");
     agent.insert_resident(&sid, make_test_handle("grok-3", false, None));
@@ -3044,7 +3065,7 @@ async fn push_roster_activity_delta_broadcasts_overridden_activity() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config");
     let sid = acp::SessionId::new("sess-activity");
     agent.insert_resident(&sid, make_test_handle("grok-3", false, None));
     agent.push_roster_activity_delta(&sid, RosterActivity::Working);
@@ -3170,7 +3191,7 @@ async fn test_unknown_session_id_returns_session_required() {
     assert!(check_nav_eligibility_from_sessions(&sessions, Some(&known_sid)).is_ok());
 }
 mod parse_json_object_env_tests {
-    use super::parse_json_object_env;
+    use crate::util::parse_json_object_env;
     unsafe fn set(k: &str, v: &str) {
         unsafe { std::env::set_var(k, v) };
     }
@@ -3498,7 +3519,7 @@ fn build_agent_with_api_key_auth_disabled() -> MvpAgent {
     let gateway = GatewaySender::new(tx);
     let mut cfg = AgentConfig::default();
     cfg.grok_com_config.disable_api_key_auth = Some(true);
-    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
+    MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config")
 }
 /// Deployment-key / managed-config user: `XAI_API_KEY` resolves and the kill switch is off.
 /// A dead `cached_token` MUST then fall through to `xai.api_key` (no browser).
@@ -4074,6 +4095,7 @@ async fn exhausted_fetch_decides_on_the_local_layers() {
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     assert!(
@@ -4624,7 +4646,7 @@ async fn spawn_seeds_root_conversation_group_in_turn_config() {
                     .terminal(false),
             );
             agent
-                .spawn_and_register_session(&init, options)
+                .spawn_and_register_session(&init, options, None)
                 .await
                 .expect("root session spawns");
             let handle = agent
@@ -5791,119 +5813,6 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
         assert!(agent.post_auth_settings_in_flight.get());
     });
 }
-#[tokio::test(flavor = "current_thread")]
-async fn settings_fetch_coalesces_concurrent_callers() {
-    let agent = build_minimal_agent_for_tests();
-    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let leader = || {
-        let calls = calls.clone();
-        move || async move {
-            calls.set(calls.get() + 1);
-            tokio::task::yield_now().await;
-            crate::remote::SettingsFetch::Fetched(Box::default())
-        }
-    };
-    let auth = xai_grok_login::GrokAuth::test_default();
-    let cluster = (0..5).map(|_| agent.settings_manager.fetch(&auth, leader()));
-    let outcomes = futures::future::join_all(cluster).await;
-    assert!(
-        outcomes
-            .iter()
-            .all(|o| matches!(o, Some(crate::remote::SettingsFetch::Fetched(_)))),
-        "every coalesced caller receives the shared success"
-    );
-    assert_eq!(calls.get(), 1, "concurrent callers share one leader fetch");
-    let _ = agent.settings_manager.fetch(&auth, leader()).await;
-    assert_eq!(
-        calls.get(),
-        2,
-        "a sequential trigger re-fetches; no stale replay"
-    );
-}
-#[tokio::test(flavor = "current_thread")]
-async fn dropped_leader_refetches_instead_of_gate_opening_retry() {
-    let agent = build_minimal_agent_for_tests();
-    let auth = xai_grok_login::GrokAuth::test_default();
-    let mut leader = Box::pin(
-        agent
-            .settings_manager
-            .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
-    );
-    tokio::select! {
-        biased;
-        _ = &mut leader => unreachable!("a pending leader cannot complete"),
-        _ = tokio::task::yield_now() => {}
-    }
-    let calls = std::rc::Rc::new(std::cell::Cell::new(0usize));
-    let calls_follower = calls.clone();
-    let mut follower = Box::pin(agent.settings_manager.fetch(&auth, move || async move {
-        calls_follower.set(calls_follower.get() + 1);
-        crate::remote::SettingsFetch::Fetched(Box::default())
-    }));
-    tokio::select! {
-        biased;
-        _ = &mut follower => unreachable!("the follower must park on the in-flight leader"),
-        _ = tokio::task::yield_now() => {}
-    }
-    assert_eq!(calls.get(), 0, "a joining follower must not fetch");
-    drop(leader);
-    assert!(
-        matches!(
-            follower.await,
-            Some(crate::remote::SettingsFetch::Fetched(_))
-        ),
-        "a cancelled leader drives a real re-fetch, not a gate-opening Retry"
-    );
-    assert_eq!(
-        calls.get(),
-        1,
-        "the follower re-plans and leads exactly one fresh fetch"
-    );
-}
-/// A follower that keeps joining leaders which drop before publishing must eventually give up with
-/// `None` — never a fabricated `Retry` that would open the fail-closed OTEL gate on cancellation churn.
-#[tokio::test(flavor = "current_thread")]
-async fn settings_fetch_returns_none_after_repeated_leader_drops() {
-    let agent = build_minimal_agent_for_tests();
-    let auth = xai_grok_login::GrokAuth::test_default();
-    macro_rules! new_fetch {
-        () => {
-            Box::pin(
-                agent
-                    .settings_manager
-                    .fetch(&auth, std::future::pending::<crate::remote::SettingsFetch>),
-            )
-        };
-    }
-    macro_rules! poll_park {
-        ($fut:expr, $msg:expr) => {
-            tokio::select! {
-                biased;
-                _ = &mut $fut => unreachable!($msg),
-                _ = tokio::task::yield_now() => {}
-            }
-        };
-    }
-    let mut leader = new_fetch!();
-    poll_park!(leader, "the first leader parks on its pending fetch");
-    let mut follower = new_fetch!();
-    poll_park!(follower, "the follower joins the first in-flight leader");
-    for _ in 0..3 {
-        let mut next = new_fetch!();
-        drop(leader);
-        poll_park!(next, "a fresh leader grabs the freed lead slot");
-        poll_park!(
-            follower,
-            "the follower re-joins the fresh leader after a drop"
-        );
-        leader = next;
-    }
-    drop(leader);
-    assert!(
-        follower.await.is_none(),
-        "past the reattempt budget the follower yields None, not a gate-opening Retry"
-    );
-}
 /// The tier re-check work is single-flight across every caller: back-to-back gated initializes run at most one live check.
 /// An awaited authenticate-path check skips (rather than doubles or waits out) a check already wedged on a stalled subscription endpoint. Drives the exact block `initialize` runs when `tier_allowed` is false.
 /// The full `initialize` fires once-per-process GROK_HOME cleanup work that a unit test must not run against the developer's real home.
@@ -6057,7 +5966,8 @@ fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let gateway = GatewaySender::new(tx);
         let cfg = crate::agent::config::Config::default();
-        let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+        let agent =
+            MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config");
         agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url =
             Some(format!("http://{addr}/v1"));
         let auth = xai_grok_login::GrokAuth {
@@ -6111,7 +6021,7 @@ fn build_agent_with_auth_and_proxy(
         ..Default::default()
     };
     cfg.endpoints.cli_chat_proxy_base_url = Some(proxy_url);
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config");
     (agent, rx)
 }
 /// Drain the gateway, returning `true` if any `x.ai/settings/update` notification was emitted (and acking each so the sender doesn't warn).
@@ -6447,7 +6357,7 @@ fn build_agent_with_gateway_rx() -> (
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(tx);
     let cfg = AgentConfig::default();
-    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+    let agent = MvpAgent::new(gateway, &cfg, auth_manager, None, None).expect("valid test config");
     (agent, rx)
 }
 /// A git repo whose only repo-local config is a project `.mcp.json` declaring `projsrv`, so it is untrusted-with-configs.
@@ -7495,8 +7405,8 @@ mod soft_default_settings_emit {
                     }),
                     ..Default::default()
                 };
-                let agent =
-                    MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+                let agent = MvpAgent::new(gateway, &cfg, auth_manager, None, None)
+                    .expect("valid test config");
                 agent.cfg.borrow_mut().remote_settings = cfg.remote_settings.clone();
                 agent.emit_settings_update_notification();
                 let msg = rx.try_recv().expect("settings/update must be emitted");
@@ -7607,7 +7517,7 @@ async fn an_attach_that_draws_a_row_switches_it_on_and_asks_for_a_fill() {
         tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
     let mut handle = make_test_handle("test-model", false, None);
     handle.cmd_tx = cmd_tx;
-    let row = handle.status_line_enabled.clone();
+    let row = handle.client_caps.status_line.clone();
     agent.insert_resident(&session_id, handle);
     let init = init_advertising_status_line(false);
     agent.attach_status_line(&session_id, Some(&status_line_meta(false)), &init);
@@ -7641,7 +7551,7 @@ fn a_disconnect_switches_the_row_off_and_the_next_attach_switches_it_on() {
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("sess-status-line-busy");
         let (handle, _tx, rx) = make_live_session_handle(&sid, None);
-        let row = handle.status_line_enabled.clone();
+        let row = handle.client_caps.status_line.clone();
         agent.insert_resident(&sid, handle);
         let _actor = spawn_fake_actor(rx, true);
         let init = init_advertising_status_line(true);
@@ -7684,4 +7594,50 @@ fn init_advertising_status_line(enabled: bool) -> acp::InitializeRequest {
             .terminal(false)
             .meta(meta),
     )
+}
+fn echo_session_meta(enabled: bool) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        crate::session::CLIENT_USER_MESSAGE_ECHO_META.to_string(),
+        serde_json::json!(enabled),
+    );
+    meta
+}
+fn init_advertising_user_message_echo(enabled: bool) -> acp::InitializeRequest {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        crate::session::USER_MESSAGE_ECHO_CAPABILITY.to_string(),
+        serde_json::json!(enabled),
+    );
+    acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+        acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new())
+            .terminal(false)
+            .meta(meta),
+    )
+}
+#[test]
+fn user_message_echo_session_meta_outranks_the_client_that_started_the_process() {
+    let says_nothing = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .terminal(false),
+        )
+    };
+    let wanted = |meta: Option<acp::Meta>, init: acp::InitializeRequest| {
+        MvpAgent::resolve_user_message_echo_capability(meta.as_ref(), &init)
+    };
+    assert!(wanted(
+        Some(echo_session_meta(true)),
+        init_advertising_user_message_echo(false)
+    ));
+    assert!(!wanted(
+        Some(echo_session_meta(false)),
+        init_advertising_user_message_echo(true)
+    ));
+    assert!(wanted(None, init_advertising_user_message_echo(true)));
+    assert!(!wanted(None, init_advertising_user_message_echo(false)));
+    assert!(!wanted(Some(acp::Meta::new()), says_nothing()));
+    assert!(!wanted(None, says_nothing()));
 }

@@ -308,6 +308,7 @@ pub async fn connect_via_leader(
         fs_read: flags.fs_read,
         fs_write: flags.fs_write,
         status_line: flags.status_line,
+        user_message_echo: true,
     };
     startup::enter(StartupPhase::LeaderConnect);
     let conn = {
@@ -440,6 +441,7 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
         "x.ai/bashOutputNoColor": true,
         "x.ai/gitHeadChanged": true,
     });
+    meta[xai_grok_shell::session::USER_MESSAGE_ECHO_CAPABILITY] = true.into();
     meta[xai_grok_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
     meta
 }
@@ -989,6 +991,14 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(blank["x.ai/hunkTracker"]["mode"], "off");
+    }
+    #[test]
+    fn client_capabilities_meta_always_requests_user_message_echo() {
+        let meta = client_capabilities_meta(&ConnectFlags::default());
+        assert_eq!(
+            meta[xai_grok_shell::session::USER_MESSAGE_ECHO_CAPABILITY],
+            true
+        );
     }
     /// The agent gates the whole payload on this key, so a misspelling on either side switches the feature off with nothing to show for it.
     #[test]

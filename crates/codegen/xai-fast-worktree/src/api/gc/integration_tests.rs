@@ -34,6 +34,7 @@ fn register_worktree_writes_correct_fields() {
     let wt_canon = dunce::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
 
     super::register_worktree(
+        None,
         &wt_path,
         std::path::Path::new("/src/repo"),
         WorktreeKind::Session,
@@ -585,6 +586,7 @@ fn db_record_survives_failed_removal() {
 
     // Register via the production registration path (uses open_default).
     super::register_worktree(
+        None,
         &wt_path,
         std::path::Path::new("/src/repo"),
         WorktreeKind::Session,
@@ -634,6 +636,7 @@ fn db_record_removed_after_successful_removal() {
         .unwrap();
 
     super::register_worktree(
+        None,
         &wt_path,
         &repo,
         WorktreeKind::Session,
@@ -657,6 +660,43 @@ fn db_record_removed_after_successful_removal() {
         !record_present(&db, &wt_path),
         "a successful removal must unregister the DB record"
     );
+}
+
+#[test]
+fn registry_home_registers_the_worktree_in_the_given_home_only() {
+    xai_test_utils::require_git!();
+    use xai_test_utils::git::{git_commit_all, init_git_repo};
+
+    // The default DB is the fixture's home; the builder is pointed at another one.
+    let fx = crate::db::GrokHomeFixture::new();
+    let other_home = fx.home.join("other-home");
+    let repo = fx.home.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_git_repo(&repo);
+    std::fs::write(repo.join("f.txt"), "x").unwrap();
+    git_commit_all(&repo, "init");
+    let wt_path = fx.home.join("injected-wt");
+    crate::WorktreeBuilder::new(&repo, &wt_path)
+        .worktree_kind(WorktreeKind::Session)
+        .session_id("injected")
+        .registry_home(&other_home)
+        .create()
+        .unwrap();
+
+    let other = WorktreeDb::open(&other_home).unwrap();
+    let record = other
+        .get(&wt_path.to_string_lossy())
+        .unwrap()
+        .expect("registered under registry_home");
+    assert_eq!(Some("injected".to_string()), record.session_id);
+    assert!(
+        !record_present(&db_at_home(&fx.home), &wt_path),
+        "the resolved home's DB did not receive the record"
+    );
+}
+
+fn db_at_home(home: &std::path::Path) -> WorktreeDb {
+    WorktreeDb::open(home).unwrap()
 }
 
 #[test]

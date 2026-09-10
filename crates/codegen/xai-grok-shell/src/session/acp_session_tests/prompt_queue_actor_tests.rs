@@ -3437,6 +3437,12 @@ async fn promoter_arms_rewind_window_and_first_update_disarms_it() {
 
             // Intake diagnostics do not count as output; they must leave the window open
             for update in [
+                XaiSessionUpdate::HookRunStarted {
+                    event_name: "user_prompt_submit".into(),
+                    tool_name: None,
+                    prompt_id: Some("m1".into()),
+                    count: 1,
+                },
                 XaiSessionUpdate::HookExecution {
                     event_name: "user_prompt_submit".into(),
                     tool_name: None,
@@ -3647,6 +3653,97 @@ async fn stale_rewind_prompt_id_does_not_cancel_promoted_front() {
             assert!(
                 !state.notifications_suppressed,
                 "a stale rewind must not arm the stop-gesture wake barrier"
+            );
+        })
+        .await;
+}
+
+/// A rewind naming a prompt queued BEHIND the running turn removes that row and resolves it `RemovedFromQueue`,
+/// even with the rewind window closed; the running turn and its slot are untouched.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_cancel_for_queued_non_running_prompt_removes_the_row() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, mut gateway_rx) = build_actor().await;
+            let (running_item, mut running_rx) =
+                input_with_origin_rx("running-1", crate::session::PromptOrigin::User);
+            let (late_item, mut late_rx) =
+                input_with_origin_rx("late-2", crate::session::PromptOrigin::User);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(running_item);
+                state.pending_inputs.push_back(late_item);
+                state.running_task = Some(running_task_stub("running-1"));
+                state.rewindable = false;
+            }
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("running-1".into());
+
+            let outcome = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    cancel_subagents: false,
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: Some("late-2".into()),
+                    },
+                    trigger: None,
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            assert!(!outcome.turn_stopped, "a queued-row trim stops no turn");
+            assert!(
+                matches!(
+                    late_rx.try_recv(),
+                    Ok(Ok(crate::session::commands::PromptTurnOk {
+                        completion_kind: PromptCompletionKind::RemovedFromQueue,
+                        ..
+                    }))
+                ),
+                "the late row resolves as RemovedFromQueue so the client discards it"
+            );
+            assert!(
+                running_rx.try_recv().is_err(),
+                "the running turn's respond_to must stay pending"
+            );
+            let state = actor.state.lock().await;
+            assert_eq!(
+                state
+                    .pending_inputs
+                    .iter()
+                    .map(|item| item.prompt_id.as_str())
+                    .collect::<Vec<_>>(),
+                ["running-1"],
+                "only the late row is removed"
+            );
+            let task = state
+                .running_task
+                .as_ref()
+                .expect("the running task slot must survive");
+            assert!(
+                !task.handle.is_finished(),
+                "the running task is not aborted"
+            );
+            assert!(
+                !state.finalization_gate.is_active(),
+                "a queued-row trim claims no finalization"
+            );
+            drop(state);
+            let mut saw_queue_broadcast = false;
+            while let Ok(message) = gateway_rx.try_recv() {
+                if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = message
+                    && args.request.method.as_ref()
+                        == crate::session::prompt_queue::QUEUE_CHANGED_METHOD
+                {
+                    saw_queue_broadcast = true;
+                }
+            }
+            assert!(
+                saw_queue_broadcast,
+                "the trim rebroadcasts the queue so every client drops the row"
             );
         })
         .await;

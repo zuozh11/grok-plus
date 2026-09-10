@@ -715,6 +715,9 @@ pub struct AppView {
     /// Session created for the current home screen. Home stays visible until
     /// the first interaction reveals it; `None` from then on.
     pub home_session_agent: Option<AgentId>,
+    /// Welcome husk. Survives reveal, which clears `home_session_agent`.
+    /// Not set for `/new`.
+    pub optimistic_home_husk: Option<AgentId>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
     /// Effects queued by notification handlers (drained by the event loop).
@@ -1482,6 +1485,7 @@ impl AppView {
             command_tags,
             welcome_prompt_focused: true,
             home_session_agent: None,
+            optimistic_home_husk: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -5736,9 +5740,10 @@ impl AppView {
         }
         if self.agents.values().any(|a| {
             a.pending_cancel_resend.is_some()
+                || a.prompt_ack.is_some()
                 || a.subagent_views
                     .values()
-                    .any(|c| c.pending_cancel_resend.is_some())
+                    .any(|c| c.pending_cancel_resend.is_some() || c.prompt_ack.is_some())
         }) {
             return TickDemand::Fast;
         }

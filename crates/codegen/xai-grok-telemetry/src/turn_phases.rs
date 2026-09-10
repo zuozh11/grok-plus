@@ -16,6 +16,7 @@ pub struct TurnPhases {
     pub turn_total_ms: u64,
     pub sampling_request_count: u32,
     pub sampling_retry_count: u32,
+    pub ttft_ms: Option<u64>,
     pub ttfm_ms: Option<u64>,
 }
 
@@ -87,6 +88,20 @@ impl TurnPhaseProfile {
         self.state.lock().generation
     }
 
+    pub fn record_first_token(&self, generation: u64) {
+        self.state
+            .lock()
+            .record_first_token(generation, Instant::now());
+    }
+
+    pub fn commit_first_token(&self) {
+        self.state.lock().commit_first_token();
+    }
+
+    pub fn discard_uncommitted_first_token(&self) {
+        self.state.lock().discard_uncommitted_first_token();
+    }
+
     pub fn record_first_meaningful_output(&self, generation: u64) {
         self.state
             .lock()
@@ -116,6 +131,7 @@ fn apply_phases(event: &mut PromptLatency, phases: &TurnPhases) {
     event.turn_total_ms = phases.turn_total_ms;
     event.sampling_request_count = phases.sampling_request_count;
     event.sampling_retry_count = phases.sampling_retry_count;
+    event.ttft_ms = phases.ttft_ms;
     event.ttfm_ms = phases.ttfm_ms;
 }
 
@@ -153,6 +169,8 @@ struct PhaseState {
     pending_idle_after_sampling: Duration,
     sampling_request_count: u32,
     sampling_retry_count: u32,
+    first_token: Option<Duration>,
+    first_token_committed: bool,
     first_meaningful: Option<Duration>,
     first_meaningful_committed: bool,
     completed: Option<TurnPhases>,
@@ -207,6 +225,28 @@ impl PhaseState {
         if self.completed.is_none() && self.started_at.is_some() {
             self.sampling_retry_count = self.sampling_retry_count.saturating_add(retries);
         }
+    }
+
+    fn commit_first_token(&mut self) {
+        if self.completed.is_none() {
+            self.first_token_committed = true;
+        }
+    }
+
+    fn discard_uncommitted_first_token(&mut self) {
+        if self.completed.is_none() && !self.first_token_committed {
+            self.first_token = None;
+        }
+    }
+
+    fn record_first_token(&mut self, generation: u64, now: Instant) {
+        if generation != self.generation || self.completed.is_some() || self.first_token.is_some() {
+            return;
+        }
+        let Some(started_at) = self.started_at else {
+            return;
+        };
+        self.first_token = Some(now.saturating_duration_since(started_at));
     }
 
     fn commit_first_meaningful(&mut self) {
@@ -270,6 +310,7 @@ impl PhaseState {
             turn_total_ms: 0,
             sampling_request_count: self.sampling_request_count,
             sampling_retry_count: self.sampling_retry_count,
+            ttft_ms: self.first_token.map(duration_to_ms),
             ttfm_ms: self.first_meaningful.map(duration_to_ms),
         };
         let total_ms = self
@@ -301,4 +342,36 @@ impl PhaseState {
 
 fn duration_to_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ttft_stamps_on_any_output_ttfm_on_text_only() {
+        let reasoning_or_tool = TurnPhaseProfile::default();
+        reasoning_or_tool.start();
+        reasoning_or_tool.record_first_token(reasoning_or_tool.current_generation());
+        let phases = reasoning_or_tool.complete();
+        assert!(phases.ttft_ms.is_some(), "any first output stamps ttft");
+        assert_eq!(
+            phases.ttfm_ms, None,
+            "reasoning and tool calls never stamp ttfm"
+        );
+
+        let reasoned_then_text = TurnPhaseProfile::default();
+        reasoned_then_text.start();
+        let generation = reasoned_then_text.current_generation();
+        reasoned_then_text.record_first_token(generation);
+        reasoned_then_text.record_first_token(generation);
+        reasoned_then_text.record_first_meaningful_output(generation);
+        let phases = reasoned_then_text.complete();
+        assert!(phases.ttft_ms.is_some(), "reasoning stamps ttft");
+        assert!(phases.ttfm_ms.is_some(), "text stamps ttfm");
+        assert!(
+            phases.ttft_ms <= phases.ttfm_ms,
+            "ttft must not exceed ttfm"
+        );
+    }
 }

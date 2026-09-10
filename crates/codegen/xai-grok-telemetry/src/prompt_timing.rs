@@ -11,7 +11,6 @@ pub struct PromptTiming {
     mcp_wait_ms: u64,
     tool_collection_ms: u64,
     repo_status_wait_ms: Option<u64>,
-    ttft_ms: Option<u64>,
     ttlb_ms: u64,
     attempts: u32,
     output_tokens: Option<u32>,
@@ -24,7 +23,6 @@ impl PromptTiming {
             mcp_wait_ms: 0,
             tool_collection_ms: 0,
             repo_status_wait_ms: None,
-            ttft_ms: None,
             ttlb_ms: 0,
             attempts: 1,
             output_tokens: None,
@@ -40,8 +38,9 @@ impl PromptTiming {
         self.repo_status_wait_ms = Some(wait_ms);
     }
 
-    pub fn record_stream_latency(&mut self, ttft_ms: Option<u64>, ttlb_ms: u64) {
-        self.ttft_ms = ttft_ms;
+    /// `ttft_ms` is not recorded here: the exported first-token latency is stamped on the
+    /// turn-start clock in [`crate::turn_phases`] and folded in when the event is emitted.
+    pub fn record_stream_latency(&mut self, ttlb_ms: u64) {
         self.ttlb_ms = ttlb_ms;
     }
 
@@ -94,7 +93,8 @@ impl PromptTiming {
             mcp_tools_registered,
             mcp_strategy,
             model_id,
-            ttft_ms: self.ttft_ms,
+            // Folded in from `turn_phases` (turn-start clock) at emit time.
+            ttft_ms: None,
             ttlb_ms: self.ttlb_ms,
             attempts: self.attempts,
             output_tokens: self.output_tokens,

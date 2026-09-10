@@ -846,15 +846,28 @@ fn grok_home() -> std::path::PathBuf {
 
 /// Returns `~/.grok/worktrees/<repo_slug>` for the given git root.
 pub fn worktree_base_dir(git_root: &Path) -> std::path::PathBuf {
+    worktree_base_dir_in(&grok_home(), git_root)
+}
+
+/// [`worktree_base_dir`] under an explicit grok home.
+pub fn worktree_base_dir_in(grok_home: &Path, git_root: &Path) -> std::path::PathBuf {
     let slug = repo_slug(git_root);
-    grok_home().join("worktrees").join(slug)
+    grok_home.join("worktrees").join(slug)
 }
 
 /// Resolves the worktree base directory (`~/.grok/worktrees/<repo_name>`) for a given source path, correctly handling grok-managed worktrees.
 /// When `source_path` is already under `~/.grok/worktrees/<repo>/...`, the repo name is derived from the directory structure directly.
 /// This avoids `find_main_repo_root_from_path`, which misidentifies standalone worktrees as the main repo root.
 pub fn worktree_base_dir_for_source(source_path: &Path) -> Result<std::path::PathBuf> {
-    let worktrees_dir = grok_home().join("worktrees");
+    worktree_base_dir_for_source_in(&grok_home(), source_path)
+}
+
+/// [`worktree_base_dir_for_source`] under an explicit grok home.
+pub fn worktree_base_dir_for_source_in(
+    grok_home: &Path,
+    source_path: &Path,
+) -> Result<std::path::PathBuf> {
+    let worktrees_dir = grok_home.join("worktrees");
 
     if let Ok(suffix) = source_path.strip_prefix(&worktrees_dir) {
         if let Some(component) = suffix.components().next() {
@@ -864,16 +877,16 @@ pub fn worktree_base_dir_for_source(source_path: &Path) -> Result<std::path::Pat
         }
     } else {
         let git_root = find_main_repo_root_from_path(source_path)?;
-        Ok(worktree_base_dir(&git_root))
+        Ok(worktree_base_dir_in(grok_home, &git_root))
     }
 }
 
-fn resolve_worktree_path(req: &CreateWorktreeRequest, git_root: &Path) -> String {
+fn resolve_worktree_path(grok_home: &Path, req: &CreateWorktreeRequest, git_root: &Path) -> String {
     if let Some(ref path) = req.worktree_path {
         return path.clone();
     }
 
-    let base = worktree_base_dir(git_root);
+    let base = worktree_base_dir_in(grok_home, git_root);
     let label = derive_worktree_label(req.label.as_deref());
     let dir_name = resolve_label_collision(&base, &label);
     base.join(dir_name).to_string_lossy().to_string()
@@ -898,12 +911,17 @@ pub fn label_from_path(worktree_path: &str) -> String {
 /// Walk up from `cwd` (staying within `~/.grok/worktrees/`) to its registered worktree record. Shared resolver for [`lookup_worktree_label`] and [`touch_worktree_for_cwd`].
 /// Returns the open DB alongside the record so callers can issue follow-up queries.
 fn worktree_record_for_cwd(cwd: &str) -> Option<(WorktreeDb, WorktreeRecord)> {
-    let worktrees_dir = grok_home().join("worktrees");
+    worktree_record_for_cwd_in(&grok_home(), cwd)
+}
+
+/// [`worktree_record_for_cwd`] against the `worktrees.db` and worktree root under an explicit grok home.
+fn worktree_record_for_cwd_in(grok_home: &Path, cwd: &str) -> Option<(WorktreeDb, WorktreeRecord)> {
+    let worktrees_dir = grok_home.join("worktrees");
     let mut path = Path::new(cwd);
     if !path.starts_with(&worktrees_dir) {
         return None;
     }
-    let db = match open_db() {
+    let db = match WorktreeDb::open(grok_home) {
         Ok(db) => db,
         Err(e) => {
             // Loud like register_worktree: a broken DB silently disables both label lookup and gc liveness touches
@@ -934,7 +952,12 @@ pub fn lookup_worktree_label(cwd: &str) -> Option<String> {
 
 /// Record activity on the worktree containing `cwd` (best-effort, infallible). Updates `last_accessed_at` in the worktree DB so `gc` expires worktrees by last use rather than creation time.
 pub fn touch_worktree_for_cwd(cwd: &str) {
-    if let Some((db, record)) = worktree_record_for_cwd(cwd)
+    touch_worktree_for_cwd_in(&grok_home(), cwd);
+}
+
+/// [`touch_worktree_for_cwd`] under an explicit grok home.
+pub fn touch_worktree_for_cwd_in(grok_home: &Path, cwd: &str) {
+    if let Some((db, record)) = worktree_record_for_cwd_in(grok_home, cwd)
         && let Err(e) = db.touch(&record.id)
     {
         // A failing touch silently degrades expiry back to created_at; leave log evidence without bothering callers
@@ -964,7 +987,7 @@ pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWo
         }
     };
 
-    let worktree_path = resolve_worktree_path(req, &git_root);
+    let worktree_path = resolve_worktree_path(&grok_home(), req, &git_root);
     let source_git_root = find_git_root_from_path(source_path)
         .ok()
         .map(|p| p.to_string_lossy().to_string());
@@ -1072,6 +1095,16 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     req: &CreateWorktreeRequest,
     notifier: &N,
 ) -> WorktreeStatus {
+    create_worktree_streaming_in(&grok_home(), req, notifier).await
+}
+
+/// [`create_worktree_streaming`] with the default worktree base and the
+/// `worktrees.db` registration under an explicit grok home.
+pub async fn create_worktree_streaming_in<N: WorktreeNotificationSender>(
+    grok_home: &Path,
+    req: &CreateWorktreeRequest,
+    notifier: &N,
+) -> WorktreeStatus {
     let start = std::time::Instant::now();
     let source_path = Path::new(&req.source_path);
     let session_id = req.session_id.clone();
@@ -1106,7 +1139,7 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         }
     };
 
-    let worktree_path_str = resolve_worktree_path(req, &git_root);
+    let worktree_path_str = resolve_worktree_path(grok_home, req, &git_root);
     let grove_enabled = req.grove_worktree.unwrap_or(false);
 
     tracing::info!(
@@ -1192,6 +1225,7 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
             .is_some_and(|n| !n.trim().is_empty() && !sanitize_label(n).is_empty());
     let label_for_meta = label_from_path(&worktree_path_str);
     let label_metadata = build_label_metadata(&label_for_meta, user_provided_label);
+    let registry_home = grok_home.to_path_buf();
     let report = match blocking_copy_on_write(move || {
         let mut builder = WorktreeBuilder::new(&source_path, &dest_path)
             .working_tree_mode(working_tree_mode)
@@ -1199,7 +1233,8 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
             .creation_mode(to_creation_mode(creation_mode))
             .worktree_kind(xai_fast_worktree::WorktreeKind::Session)
             .session_id(session_id_for_builder)
-            .metadata(label_metadata);
+            .metadata(label_metadata)
+            .registry_home(registry_home);
 
         if let Some(ref git_ref) = git_ref {
             builder = builder.git_ref(git_ref);
@@ -2762,7 +2797,7 @@ pub struct RehydrateSessionResponse {
 use xai_fast_worktree::{
     DbStats, GcOptions, GcReport, ListFilter, WorktreeAutoGcLayer, WorktreeDb, WorktreeKind,
     WorktreeRecord, gc_worktrees as fw_gc_worktrees, rebuild_worktree_db, resolve_grok_home,
-    resolve_worktree_auto_gc_from_layers, run_auto_gc_pass,
+    resolve_worktree_auto_gc_from_layers,
 };
 
 pub fn open_db() -> Result<WorktreeDb> {
@@ -2920,38 +2955,57 @@ pub fn worktree_auto_gc_layer_from_settings(
     }
 }
 
-/// Parse `[worktree.auto_gc]` out of the workspace's `$GROK_HOME/config.toml`.
+/// Load `$GROK_HOME/config.toml` through the shell's config pipeline and pull out `[worktree.auto_gc]`.
 ///
-/// Returns `None` when the table is absent or fails to deserialize.
-fn worktree_auto_gc_settings_from_toml(
-    root: &toml::Value,
+/// `xai_grok_config::load_config_file` is the same reader the shell uses (`$VAR` expansion, `[[version_overrides]]`,
+/// redacted parse-error logging), so a table that the shell honors is honored here too.
+/// Returns `None` when the file is unreadable or malformed, or the table is absent or fails to deserialize.
+/// Takes `home` so the document-to-settings path is testable without touching `$GROK_HOME`.
+fn load_local_worktree_auto_gc_settings(
+    home: &Path,
 ) -> Option<xai_grok_config_types::WorktreeAutoGcSettings> {
-    root.get("worktree")
-        .and_then(|w| w.get("auto_gc"))
-        // toml::Value only deserializes by value (no &Value Deserializer).
-        .and_then(|v| xai_grok_config_types::WorktreeAutoGcSettings::deserialize(v.clone()).ok())
+    let root = xai_grok_config::load_config_file(&home.join(xai_grok_config::USER_CONFIG_FILENAME))
+        .inspect_err(|error| {
+            // The loader's error is already snippet-free, so it is safe to log
+            tracing::debug!(%error, "config.toml did not load; skipping the local auto-GC opt-in");
+        })
+        .ok()?;
+    worktree_auto_gc_settings_from_config(root)
+}
+
+/// Pull `[worktree.auto_gc]` out of an already-loaded `config.toml` document.
+///
+/// Returns `None` when the root or `worktree` is not a table, `auto_gc` is absent, or it fails to deserialize.
+fn worktree_auto_gc_settings_from_config(
+    mut root: toml::Value,
+) -> Option<xai_grok_config_types::WorktreeAutoGcSettings> {
+    let auto_gc = root
+        .as_table_mut()?
+        .remove("worktree")?
+        .as_table_mut()?
+        .remove("auto_gc")?;
+    xai_grok_config_types::WorktreeAutoGcSettings::deserialize(auto_gc)
+        .inspect_err(|error| {
+            tracing::debug!(%error, "[worktree.auto_gc] did not deserialize; skipping the local auto-GC opt-in");
+        })
+        .ok()
 }
 
 /// Remote-blind (env and `$GROK_HOME/config.toml` only): opts in only when local `[worktree.auto_gc] enabled = true`, else returns `None`.
 /// A forced dry-run would stamp the shared throttle and block the shell agent's remote-aware pass over the same DB, so skip instead.
-fn resolve_worktree_auto_gc_local() -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
-    let local = if let Ok(home) = resolve_grok_home() {
-        let path = home.join("config.toml");
-        if let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(root) = text.parse::<toml::Value>()
-        {
-            worktree_auto_gc_settings_from_toml(&root)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+///
+/// An explicit local opt-in makes the local layer (over built-in defaults) win for this pass: remote `worktree_auto_gc`
+/// knobs are not consulted, and a successful pass stamps the shared throttle, so the shell's remote-aware pass over the
+/// same DB is skipped until `min_interval_secs` elapses. Users who opt in locally are choosing their local knobs over remote ones.
+fn resolve_worktree_auto_gc_local_in(
+    grok_home: &Path,
+) -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
+    let local = load_local_worktree_auto_gc_settings(grok_home);
     local_auto_gc_policy(local.as_ref())
 }
 
 /// Pure opt-in decision (no IO): `None` unless local config explicitly enables the pass.
-/// Split out of `resolve_worktree_auto_gc_local` so the fail-safe is testable without touching `$GROK_HOME`.
+/// Split out of `resolve_worktree_auto_gc_local_in` so the fail-safe is testable without touching `$GROK_HOME`.
 fn local_auto_gc_policy(
     local: Option<&xai_grok_config_types::WorktreeAutoGcSettings>,
 ) -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
@@ -2965,11 +3019,23 @@ fn local_auto_gc_policy(
 
 /// Sync auto-GC for handle startup (caller must `spawn_blocking`).
 pub fn run_auto_gc_best_effort() {
-    let Some(policy) = resolve_worktree_auto_gc_local() else {
+    match resolve_grok_home() {
+        Ok(home) => run_auto_gc_best_effort_in(&home),
+        Err(error) => tracing::debug!(%error, "auto worktree gc skipped at workspace startup"),
+    }
+}
+
+/// [`run_auto_gc_best_effort`] reading `<grok_home>/config.toml` and `<grok_home>/worktrees.db`.
+pub fn run_auto_gc_best_effort_in(grok_home: &Path) {
+    let Some(policy) = resolve_worktree_auto_gc_local_in(grok_home) else {
         tracing::debug!("auto worktree gc skipped at workspace startup: no local opt-in");
         return;
     };
-    run_auto_gc_pass(&policy, "workspace startup");
+    if let Err(error) =
+        WorktreeDb::open(grok_home).and_then(|db| xai_fast_worktree::maybe_auto_gc(&db, &policy))
+    {
+        tracing::warn!(%error, context = "workspace startup", "auto worktree gc failed");
+    }
 }
 
 pub fn worktree_db_stats() -> Result<DbStats> {
@@ -3127,6 +3193,64 @@ mod tests {
             !policy.dry_run,
             "an explicit local opt-in runs a real pass, not a forced dry-run"
         );
+    }
+
+    /// A real `config.toml` is a document with table headers, not a bare value.
+    #[test]
+    fn worktree_auto_gc_settings_load_from_config_toml_document() {
+        use xai_grok_config_types::WorktreeAutoGcSettings;
+
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            home.path().join(xai_grok_config::USER_CONFIG_FILENAME),
+            "[worktree.auto_gc]\nenabled = true\nmax_age_secs = 86400\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Some(WorktreeAutoGcSettings {
+                enabled: Some(true),
+                max_age_secs: Some(86400),
+                ..WorktreeAutoGcSettings::default()
+            }),
+            load_local_worktree_auto_gc_settings(home.path())
+        );
+    }
+
+    #[test]
+    fn worktree_auto_gc_settings_malformed_config_toml_is_none() {
+        let home = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            home.path().join(xai_grok_config::USER_CONFIG_FILENAME),
+            "[worktree.auto_gc\nenabled = true\n",
+        )
+        .unwrap();
+        assert_eq!(None, load_local_worktree_auto_gc_settings(home.path()));
+    }
+
+    #[test]
+    fn worktree_auto_gc_settings_missing_config_toml_is_none() {
+        let home = tempfile::TempDir::new().unwrap();
+        assert_eq!(None, load_local_worktree_auto_gc_settings(home.path()));
+    }
+
+    #[test]
+    fn worktree_auto_gc_settings_absent_table_is_none() {
+        let root = toml::from_str::<toml::Value>("[pager]\ntheme = \"dark\"\n").unwrap();
+        assert_eq!(None, worktree_auto_gc_settings_from_config(root));
+    }
+
+    #[test]
+    fn worktree_auto_gc_settings_non_table_root_is_none() {
+        assert_eq!(
+            None,
+            worktree_auto_gc_settings_from_config(toml::Value::Integer(5))
+        );
+    }
+
+    #[test]
+    fn worktree_auto_gc_settings_non_table_auto_gc_is_none() {
+        let root = toml::from_str::<toml::Value>("[worktree]\nauto_gc = 5\n").unwrap();
+        assert_eq!(None, worktree_auto_gc_settings_from_config(root));
     }
 
     fn git_out(dir: &Path, args: &[&str]) -> String {
@@ -3388,6 +3512,105 @@ mod tests {
             Some("my-label")
         );
         assert_eq!(lookup_worktree_label("/elsewhere"), None);
+    }
+
+    /// A `worktrees.db` under `home` with one record at `<home>/worktrees/repo/wt`, no env involved.
+    fn worktree_db_at(home: &Path) -> std::path::PathBuf {
+        let wt = home.join("worktrees").join("repo").join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        let db = WorktreeDb::open(home).unwrap();
+        db.register(&WorktreeRecord {
+            id: "wt".to_string(),
+            path: wt.clone(),
+            source_repo: "/repo".into(),
+            repo_name: "repo".to_string(),
+            kind: WorktreeKind::Session,
+            creation_mode: "linked".to_string(),
+            git_ref: None,
+            head_commit: None,
+            session_id: None,
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: None,
+            status: xai_fast_worktree::WorktreeStatus::Alive,
+            metadata: None,
+        })
+        .unwrap();
+        wt
+    }
+
+    fn last_accessed(home: &Path) -> Option<i64> {
+        WorktreeDb::open(home)
+            .unwrap()
+            .get_by_id("wt")
+            .unwrap()
+            .unwrap()
+            .last_accessed_at
+    }
+
+    #[test]
+    fn touch_worktree_for_cwd_in_targets_the_given_home_only() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
+        let (home_a, home_b) = (root.join("a"), root.join("b"));
+        let wt = worktree_db_at(&home_a);
+        worktree_db_at(&home_b);
+
+        touch_worktree_for_cwd_in(&home_b, &wt.to_string_lossy());
+        assert_eq!(
+            None,
+            last_accessed(&home_a),
+            "a cwd outside home_b's worktrees is ignored"
+        );
+        assert_eq!(None, last_accessed(&home_b));
+
+        touch_worktree_for_cwd_in(&home_a, &wt.join("src").to_string_lossy());
+        assert!(
+            last_accessed(&home_a).is_some(),
+            "the record under the given home is touched"
+        );
+        assert_eq!(None, last_accessed(&home_b), "the other home is untouched");
+    }
+
+    #[test]
+    fn worktree_base_dir_for_source_in_targets_the_given_home() {
+        xai_test_utils::require_git!();
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = temp.path().join("grok-home");
+        let managed = home.join("worktrees").join("repo").join("wt").join("src");
+        assert_eq!(
+            home.join("worktrees").join("repo"),
+            worktree_base_dir_for_source_in(&home, &managed).unwrap(),
+            "a source under the home's worktrees keeps its repo dir"
+        );
+        let repo = xai_test_utils::git::seed_repo(temp.path());
+        assert_eq!(
+            home.join("worktrees").join(repo_slug(&repo)),
+            worktree_base_dir_for_source_in(&home, &repo).unwrap(),
+            "a plain repository lands under the given home, not the resolved one"
+        );
+    }
+
+    /// Without a local opt-in the pass under the given home is a no-op: no
+    /// throttle stamp, the dead-path record untouched. The enabled pass is
+    /// exercised by the local `[worktree.auto_gc]` parse fix that ships
+    /// separately (until it lands, `[worktree.auto_gc]` never resolves to a policy).
+    #[test]
+    fn run_auto_gc_best_effort_in_without_opt_in_leaves_the_given_home_alone() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let home = dunce::canonicalize(temp.path()).unwrap().join("grok-home");
+        let wt = worktree_db_at(&home);
+        std::fs::remove_dir_all(&wt).unwrap();
+
+        run_auto_gc_best_effort_in(&home);
+        let db = WorktreeDb::open(&home).unwrap();
+        assert_eq!(None, db.get_meta("last_auto_gc_at").unwrap(), "no pass ran");
+        let record = db.get_by_id("wt").unwrap().expect("record kept");
+        assert_eq!(
+            (xai_fast_worktree::WorktreeStatus::Alive, None),
+            (record.status, record.last_accessed_at),
+            "the dead-path record is exactly as registered"
+        );
     }
 
     /// A cancelled fork's cleanup must remove the partial worktree directory AND deregister it from the source repo's `.git/worktrees/`.

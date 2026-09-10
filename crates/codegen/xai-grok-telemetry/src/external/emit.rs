@@ -14,13 +14,22 @@ use super::schema::{
     METRIC_SESSION_COUNT, METRIC_STARTUP_INTERACTIVE, METRIC_STARTUP_PHASE_DURATION,
     METRIC_STARTUP_SUBTIMER_DURATION, METRIC_STARTUP_TIMEOUT, METRIC_STARTUP_TOTAL,
     METRIC_TOKEN_USAGE, METRIC_TOOL_DECISION, METRIC_TOOL_USAGE, METRIC_TURN_COUNT,
-    MetricIncrement,
+    METRIC_TURN_TTFM, METRIC_TURN_TTFT, MetricIncrement,
 };
 
-/// Default OTel buckets end at 10s; startup failures land in the 10-30s range, so those samples need real buckets, not +Inf.
-const STARTUP_MS_BOUNDARIES: &[f64] = &[
+/// Default OTel buckets end at 10s; startup failures and slow first tokens land in the 10-120s range, so those samples need real buckets, not +Inf.
+const LATENCY_MS_BOUNDARIES: &[f64] = &[
     50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0,
 ];
+
+/// A `ms`-unit `u64` histogram over the shared latency buckets.
+fn ms_histogram(meter: &Meter, name: &'static str) -> Histogram<u64> {
+    meter
+        .u64_histogram(name)
+        .with_unit("ms")
+        .with_boundaries(LATENCY_MS_BOUNDARIES.to_vec())
+        .build()
+}
 
 /// Pre-created counters/histograms (a test pins the names, units, and attr keys).
 pub(crate) struct Instruments {
@@ -31,6 +40,8 @@ pub(crate) struct Instruments {
     tool_decision: Counter<u64>,
     tool_usage: Counter<u64>,
     error_count: Counter<u64>,
+    turn_ttft: Histogram<u64>,
+    turn_ttfm: Histogram<u64>,
     startup_timeout: Counter<u64>,
     startup_phase_duration: Histogram<u64>,
     startup_subtimer_duration: Histogram<u64>,
@@ -69,30 +80,16 @@ impl Instruments {
                 .u64_counter(METRIC_ERROR_COUNT)
                 .with_unit("{error}")
                 .build(),
+            turn_ttft: ms_histogram(meter, METRIC_TURN_TTFT),
+            turn_ttfm: ms_histogram(meter, METRIC_TURN_TTFM),
             startup_timeout: meter
                 .u64_counter(METRIC_STARTUP_TIMEOUT)
                 .with_unit("{timeout}")
                 .build(),
-            startup_phase_duration: meter
-                .u64_histogram(METRIC_STARTUP_PHASE_DURATION)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
-            startup_subtimer_duration: meter
-                .u64_histogram(METRIC_STARTUP_SUBTIMER_DURATION)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
-            startup_total: meter
-                .u64_histogram(METRIC_STARTUP_TOTAL)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
-            startup_interactive: meter
-                .u64_histogram(METRIC_STARTUP_INTERACTIVE)
-                .with_unit("ms")
-                .with_boundaries(STARTUP_MS_BOUNDARIES.to_vec())
-                .build(),
+            startup_phase_duration: ms_histogram(meter, METRIC_STARTUP_PHASE_DURATION),
+            startup_subtimer_duration: ms_histogram(meter, METRIC_STARTUP_SUBTIMER_DURATION),
+            startup_total: ms_histogram(meter, METRIC_STARTUP_TOTAL),
+            startup_interactive: ms_histogram(meter, METRIC_STARTUP_INTERACTIVE),
         }
     }
 }
@@ -297,6 +294,14 @@ fn add_increment(
             attrs.push(KeyValue::new("outcome", outcome));
             attrs.push(KeyValue::new("model", scrub(&model)));
             instruments.turn_count.add(1, &attrs);
+        }
+        MetricIncrement::TurnTtft { duration_ms, model } => {
+            attrs.push(KeyValue::new("model", scrub(&model)));
+            instruments.turn_ttft.record(duration_ms, &attrs);
+        }
+        MetricIncrement::TurnTtfm { duration_ms, model } => {
+            attrs.push(KeyValue::new("model", scrub(&model)));
+            instruments.turn_ttfm.record(duration_ms, &attrs);
         }
         MetricIncrement::ToolDecision {
             tool_name,

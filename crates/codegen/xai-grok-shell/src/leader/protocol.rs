@@ -159,6 +159,13 @@ pub struct ClientCapabilities {
     /// The agent then builds the payload for a client that asked, not for whichever one started the process. The flag it sets is per session, so other subscribers of a shared session receive the payload too.
     #[serde(default)]
     pub status_line: bool,
+
+    /// Whether this client wants live `user_message_chunk` during a prompt (`x.ai/userMessageEcho`).
+    /// When true, the leader injects `clientUserMessageEcho: true`. False is omitted so a client
+    /// that advertised at initialize is not overridden (`grok agent` is persist-only).
+    /// The flag it sets is per session, so other subscribers of a shared session receive the echo too.
+    #[serde(default)]
+    pub user_message_echo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
