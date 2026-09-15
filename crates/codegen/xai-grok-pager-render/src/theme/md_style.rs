@@ -68,8 +68,14 @@ fn heading_inner_styles(
     mods: [ratatui::style::Modifier; 6],
 ) -> [Style; 6] {
     std::array::from_fn(|i| {
-        let color_style = fg(colors[i]);
-        let mod_style = modifier_to_anstyle(mods[i]);
+        let Some(&color) = colors.get(i) else {
+            return Style::new();
+        };
+        let Some(&m) = mods.get(i) else {
+            return Style::new();
+        };
+        let color_style = fg(color);
+        let mod_style = modifier_to_anstyle(m);
         // Combine fg color with modifier effects.
         let mut s = color_style;
         let effects = mod_style.get_effects();
@@ -94,24 +100,15 @@ pub fn style() -> MarkdownStyle {
 fn build_style() -> MarkdownStyle {
     let theme = super::Theme::current();
     let is_grok_plus = super::Theme::current_kind() == super::ThemeKind::GrokPlus;
-    let (strong, emphasis, quote_text, quote_bar, list, rule) = if is_grok_plus {
+    let (strong, emphasis, list, rule) = if is_grok_plus {
         (
             super::grokplus::MD_STRONG,
             super::grokplus::MD_EMPHASIS,
-            super::grokplus::MD_QUOTE_TEXT,
-            super::grokplus::MD_QUOTE_BAR,
             super::grokplus::MD_LIST,
             super::grokplus::MD_RULE,
         )
     } else {
-        (
-            theme.md_text,
-            theme.md_text,
-            theme.md_text,
-            theme.md_muted,
-            theme.md_muted,
-            theme.md_muted,
-        )
+        (theme.md_text, theme.md_text, theme.md_muted, theme.md_muted)
     };
 
     let heading_colors = [
@@ -142,18 +139,9 @@ fn build_style() -> MarkdownStyle {
         strikethrough_outer: Style::new().dimmed().hidden(),
         inline_code_inner: fg(theme.md_code).bold(),
         inline_code_outer: fg(theme.md_code).dimmed().hidden(),
-        blockquote_inner: if is_grok_plus {
-            fg(quote_text)
-        } else {
-            fg(theme.md_text)
-        },
         // The selection-side bar detection in xai-grok-pager (scrollback/blocks/quote_bar.rs, `quote_bar_style`) mirrors this exact style
         // Its end-to-end tests fail if this line changes
-        blockquote_outer: if is_grok_plus {
-            fg(quote_bar)
-        } else {
-            fg(quote_bar).dimmed()
-        },
+        blockquote_outer: fg(theme.md_muted).dimmed(),
         task_checked: fg(theme.md_task_checked),
         task_unchecked: fg(theme.md_task_unchecked).dimmed(),
         list_item: fg(list),

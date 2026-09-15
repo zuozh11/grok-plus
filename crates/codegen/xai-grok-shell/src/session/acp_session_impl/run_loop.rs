@@ -501,6 +501,7 @@ pub(super) async fn run_session(
         });
     }
     let startup_tasks = StartupTasks::spawn(&session, completion_tx.clone());
+    session.resume_v2_capture().await;
     let mut model_switch_rx = session.models_manager.subscribe_model_switch();
     let _ = *model_switch_rx.borrow_and_update();
     let idle_flush_sleep = match session.idle_flush_timeout {
@@ -662,6 +663,8 @@ pub(super) async fn run_session(
                         let end_timer = session_end::SessionEndTimer::new_shared();
                         turn_end_queue.flush().await;
                         fire_session_end_hooks(&session, "channel_closed", &end_timer, &mut deferred_start).await;
+                        session.memory.stop_capture_worker().await;
+                        session.memory.dream_workers.cancel_and_join().await;
                         // Stop the dream before the end-pipeline reindex so their index writes cannot race.
                         stop_dream(&mut dream_task).await;
                         session
@@ -833,16 +836,16 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { switch, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(switch).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::SetReasoningEffort { effort, responds_to } => {
                             let updated_model_id = session.handle_set_reasoning_effort(effort).await;
                             let _ = responds_to.send(updated_model_id);
                         }
-                        SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {
-                            let outcome = session.handle_rebuild_agent_for_definition(definition).await;
+                        SessionCommand::RebuildAgentForDefinition { definition, system_prompt_label, responds_to } => {
+                            let outcome = session.handle_rebuild_agent_for_definition(definition, system_prompt_label).await;
                             let _ = responds_to.send(outcome);
                         }
                         SessionCommand::OverrideModelName { model_name, extra_headers, context_window } => {
@@ -1226,7 +1229,15 @@ pub(super) async fn run_session(
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
                                 if s.memory.is_enabled() {
-                                    let did_flush = s.run_memory_flush("user_requested", None).await;
+                                    let did_flush =
+                                        if s.memory.mode() == Some(crate::config::MemoryMode::V2) {
+                                            matches!(
+                                                s.flush_v2_capture().await,
+                                                crate::session::memory::v2_capture::FlushResult::Success
+                                            )
+                                        } else {
+                                            s.run_memory_flush("user_requested", None).await
+                                        };
                                     let _ = respond_to.send(Ok(did_flush));
                                 } else {
                                     let _ = respond_to.send(Err(
@@ -1234,6 +1245,18 @@ pub(super) async fn run_session(
                                             .data("memory is not enabled for this session".to_string())
                                     ));
                                 }
+                            });
+                        }
+                        SessionCommand::MemoryForget {
+                            path,
+                            expected_content_hash,
+                            respond_to,
+                        } => {
+                            let s = session.clone();
+                            tokio::task::spawn_local(async move {
+                                let response =
+                                    s.memory_forget(&path, &expected_content_hash).await;
+                                let _ = respond_to.send(response);
                             });
                         }
                         SessionCommand::SetYoloMode { enabled } => {
@@ -1670,7 +1693,7 @@ pub(super) async fn run_session(
                                         schema,
                                         meta,
                                     );
-                                    if let Some(reg) = mcp_tool.into_registration() {
+                                    if let Ok(reg) = mcp_tool.into_registration() {
                                         mcp_state
                                             .disabled_tool_registrations
                                             .insert(qualified.clone(), reg);
@@ -1740,16 +1763,8 @@ pub(super) async fn run_session(
                             let _ = respond_to.send(session.client_hooks.borrow().clone());
                         }
                         SessionCommand::SnapshotToolDefinitions { respond_to } => {
-                            // Verbatim mirrors inherit the parent schema for radix-cache reuse
-                            // Root-only ActiveAgentMessage tools are stripped, the same strip a rebuilt child gets
                             let defs = session.prepare_tool_definitions_inner().await;
                             let specs = session.turn_base_tool_specs(&defs);
-                            let bridge = session.agent.borrow().tool_bridge().clone();
-                            let specs = child_tool_projection::child_safe_tool_specs(
-                                specs,
-                                child_tool_projection::ChildToolProjection::VerbatimMirror,
-                                |name| bridge.tool_kind(name),
-                            );
                             let _ = respond_to.send(specs);
                         }
                         SessionCommand::SetClientHooks { hooks } => {
@@ -1984,10 +1999,14 @@ pub(super) async fn run_session(
                             let agent_type = session.active_agent_type.lock().clone();
                             let _ = responds_to.send(agent_type);
                         }
-                        SessionCommand::SideQuestion { question, respond_to } => {
+                        SessionCommand::SideQuestion {
+                            question,
+                            images,
+                            respond_to,
+                        } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_side_question(&question).await;
+                                let result = s.handle_side_question(&question, images).await;
                                 let _ = respond_to.send(result);
                             });
                         }
@@ -2235,6 +2254,8 @@ pub(super) async fn run_session(
                             // Hooks fire BEFORE memory auto-save
                             turn_end_queue.flush().await;
                             fire_session_end_hooks(&session, "shutdown", &end_timer, &mut deferred_start).await;
+                            session.memory.stop_capture_worker().await;
+                            session.memory.dream_workers.cancel_and_join().await;
                             // Stop the dream before the end-pipeline reindex so their index writes cannot race.
                             stop_dream(&mut dream_task).await;
                             session
@@ -2274,6 +2295,8 @@ pub(super) async fn run_session(
                         // No session-end hooks here, but the flush still precedes `shutdown_workflows`, which makes a queued report's entry durable
                         let end_timer = session_end::SessionEndTimer::new_shared();
                         turn_end_queue.flush().await;
+                        session.memory.stop_capture_worker().await;
+                        session.memory.dream_workers.cancel_and_join().await;
                         // Stop the dream so it does not outlive the session holding the mutex.
                         stop_dream(&mut dream_task).await;
                         shutdown_workflows(&session, &end_timer).await;
@@ -2299,6 +2322,28 @@ pub(super) async fn run_session(
                             ..
                         })
                     );
+                    // Capture only a genuine root query that completed its tool loop with
+                    // EndTurn. Synthetic wakes and built-ins also produce PromptTurnOk, but
+                    // neither is durable conversation evidence for memory extraction.
+                    let v2_capture_eligible = super::memory_capture::is_successful_query_loop(
+                        &result,
+                    ) && {
+                        let state = session.state.lock().await;
+                        state.pending_inputs.front().is_some_and(|input| {
+                            input.prompt_id == prompt_id
+                                && input.queue_meta.is_some()
+                                && !input.input_origin.is_synthetic()
+                                && crate::session::slash_authority::parse_slash_prefix(
+                                    &input.prompt_blocks,
+                                )
+                                .is_none()
+                        })
+                    };
+                    let v2_capture_source_prompt_index = if v2_capture_eligible {
+                        Some(*session.tool_context.prompt_index.lock().await)
+                    } else {
+                        None
+                    };
                     let completed_prompt_id = prompt_id.clone();
                     if !session
                         .handle_completion(prompt_id, epoch, &task_identity, result, elapsed_ms)
@@ -2309,6 +2354,11 @@ pub(super) async fn run_session(
                             let _ = processed.send(());
                         }
                         continue;
+                    }
+                    if let Some(source_prompt_index) = v2_capture_source_prompt_index {
+                        session
+                            .enqueue_v2_completed_turn(source_prompt_index)
+                            .await;
                     }
                     #[cfg(test)]
                     if let Some(processed) = processed {
@@ -2383,7 +2433,9 @@ pub(super) fn turn_texts_for_feedback(
     else {
         return (None, None);
     };
-    let raw = conversation[start].text_content();
+    let Some(raw) = conversation.get(start).map(|item| item.text_content()) else {
+        return (None, None);
+    };
     let extracted = xai_chat_state::compaction_utils::extract_user_query(&raw);
     let user_text = (!extracted.is_empty()).then_some(extracted);
     let assistant_text = conversation

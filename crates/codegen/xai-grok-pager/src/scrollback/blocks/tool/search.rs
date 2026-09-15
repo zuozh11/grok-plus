@@ -451,9 +451,9 @@ impl BlockContent for SearchToolCallBlock {
                     for path in &self.file_paths {
                         let line = if is_count {
                             // Count mode: "path:N", split at the last ':'; the path part in path color, ":N" in normal fg
-                            if let Some(colon_pos) = path.rfind(':') {
-                                let file_part = &path[..colon_pos];
-                                let count_part = &path[colon_pos..]; // includes ':'
+                            if let Some((file_part, count_part)) =
+                                path.rfind(':').and_then(|pos| path.split_at_checked(pos))
+                            {
                                 Line::from(vec![
                                     Span::styled(
                                         format!("{indent}{file_part}"),

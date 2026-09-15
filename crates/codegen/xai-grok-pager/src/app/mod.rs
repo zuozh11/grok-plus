@@ -31,6 +31,7 @@ pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
 mod connect_timeout;
 mod csi_filter;
+mod dashboard_session_picker;
 mod dispatch;
 pub mod roster;
 pub mod session_startup;
@@ -44,10 +45,12 @@ pub(crate) mod worktree_session;
 pub(crate) use dispatch::dashboard_stop_readiness;
 /// Display-refresh probe + motion cadence + terminal telemetry at startup.
 mod display_refresh_startup;
-mod effects;
+pub(crate) mod effects;
 pub(crate) mod error_display;
 mod x10_filter;
 pub(crate) use effects::{cancel_notification_meta, sanitize_user_error};
+#[cfg(test)]
+pub(crate) mod agent_test_fixtures;
 mod event_loop;
 mod event_loop_stall;
 mod exit_timeout;
@@ -743,6 +746,15 @@ pub async fn run(
     seed_remote_ui_caches(remote_settings.as_ref());
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
+    xai_grok_shell::config::cache_standalone_memory_mode(
+        xai_grok_shell::config::MemoryConfig::resolve(
+            args.experimental_memory,
+            args.no_memory,
+            &raw_config,
+            remote_settings.as_ref(),
+        )
+        .mode,
+    );
     let prefetch_elapsed = startup_start.elapsed();
     let requested_confinement = xai_grok_sandbox::requested_confinement_profile();
     let LeaderMode {
@@ -1865,17 +1877,7 @@ mod tests {
         );
     }
     fn test_terminal_and_writer_thread() -> (PagerTerminal, WriterThread) {
-        use ratatui::{TerminalOptions, Viewport};
-        let (tx, _rx) = std::sync::mpsc::channel::<crate::render::draw::WriterPayload>();
-        let sync = WriterSync::new();
-        let backend = CrosstermBackend::new(TermWriter::new(tx, sync).expect("single test writer"));
-        let terminal = xai_ratatui_inline::Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
-            },
-        )
-        .expect("test terminal");
+        let (terminal, _frame_rx) = crate::test_util::test_terminal();
         let (writer_tx, _writer_sync, _events, writer_thread) =
             crate::render::draw::spawn_writer_thread().expect("spawn test writer thread");
         drop(writer_tx);

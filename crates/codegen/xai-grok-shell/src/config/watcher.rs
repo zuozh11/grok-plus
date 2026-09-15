@@ -753,16 +753,20 @@ mod tests {
         let dirs = project_grok_refresh_dirs(project);
 
         assert_eq!(dirs.len(), 4);
-        assert_eq!(dirs[0], (grok.clone(), RecursiveMode::NonRecursive));
+        let [first, rest @ ..] = dirs.as_slice() else {
+            panic!("expected four refresh dirs: {dirs:?}");
+        };
+        assert_eq!(first, &(grok.clone(), RecursiveMode::NonRecursive));
         assert_eq!(
-            &dirs[1..],
+            rest,
             [
                 (grok.join("skills"), RecursiveMode::Recursive),
                 (grok.join("commands"), RecursiveMode::NonRecursive),
                 (grok.join("workflows"), RecursiveMode::NonRecursive),
             ]
+            .as_slice()
         );
-        assert_eq!(dirs[1..], vendor_skill_refresh_dirs(&grok));
+        assert_eq!(rest, vendor_skill_refresh_dirs(&grok).as_slice());
     }
 
     #[test]

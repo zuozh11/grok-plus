@@ -10,8 +10,6 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
 
 pub(crate) const MD_STRONG: Color = rgb(255, 190, 175); // #ffbeaf
 pub(crate) const MD_EMPHASIS: Color = rgb(247, 213, 189); // #f7d5bd
-pub(crate) const MD_QUOTE_TEXT: Color = rgb(150, 127, 84); // #967f54, subdued quote text
-pub(crate) const MD_QUOTE_BAR: Color = rgb(229, 192, 123); // #e5c07b, original quote bar
 pub(crate) const MD_LIST: Color = rgb(108, 108, 108); // #6c6c6c
 pub(crate) const MD_RULE: Color = rgb(104, 103, 112); // #686770
 

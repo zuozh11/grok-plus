@@ -32,7 +32,7 @@ pub use identity::{WorktreeIdentity, worktree_identity_for_cwd, worktree_identit
 pub use xai_grok_workspace_types::rpc::worktree::{
     ApplyMode, ApplyWorktreeRequest, ApplyWorktreeResponse, CopiedChangesSummary,
     CreateWorktreeFromWorktreeRequestWire, CreateWorktreeFromWorktreeResponse,
-    CreateWorktreeRequest, CreateWorktreeResponse, DirtyStateSummary, FileConflict,
+    CreateWorktreeRequest, CreateWorktreeResponse, DirtyStateSummary, FileConflict, GroveTransport,
     RemoveWorktreeRequest, RemoveWorktreeResponse, StrategyReport, WorktreeCopyMode, WorktreeType,
     transport_for_resolved,
 };
@@ -53,13 +53,7 @@ where
 /// Fast btrfs CoW cannot snapshot FUSE; callers must fall back to a plain git checkout ([`WorktreeType::Git`]).
 /// `fusectl` is not a guest mount (never match `/^fuse/` blindly).
 pub(crate) fn is_grove_fuse_mount(path: &Path) -> bool {
-    if path_looks_like_grove_store(path) {
-        return true;
-    }
     let abs = dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if path_looks_like_grove_store(&abs) {
-        return true;
-    }
     let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
         return false;
     };
@@ -67,10 +61,6 @@ pub(crate) fn is_grove_fuse_mount(path: &Path) -> bool {
         let f = fstype.to_ascii_lowercase();
         (f == "fuse" || f.starts_with("fuse.")) && f != "fusectl"
     })
-}
-
-fn path_looks_like_grove_store(path: &Path) -> bool {
-    path.to_string_lossy().contains("/var/lib/grove/")
 }
 
 /// Unescape the octal escapes the kernel writes in `/proc/self/mountinfo` fields: space=`\040`, tab=`\011`, newline=`\012`, backslash=`\134`.
@@ -85,18 +75,20 @@ fn unescape_mountinfo_field(s: &str) -> String {
     let mut out: Vec<u8> = Vec::with_capacity(s.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\'
+        let Some(&b) = bytes.get(i) else { break };
+        if b == b'\\'
             && i + 4 <= bytes.len()
-            && bytes[i + 1].is_ascii_digit()
-            && bytes[i + 2].is_ascii_digit()
-            && bytes[i + 3].is_ascii_digit()
-            && let Ok(code) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+            && bytes.get(i + 1).is_some_and(|c| c.is_ascii_digit())
+            && bytes.get(i + 2).is_some_and(|c| c.is_ascii_digit())
+            && bytes.get(i + 3).is_some_and(|c| c.is_ascii_digit())
+            && let Some(octal) = s.get(i + 1..i + 4)
+            && let Ok(code) = u8::from_str_radix(octal, 8)
         {
             out.push(code);
             i += 4;
             continue;
         }
-        out.push(bytes[i]);
+        out.push(b);
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -133,14 +125,6 @@ fn longest_covering_fstype<'a>(mountinfo: &'a str, path: &Path) -> Option<&'a st
 mod grove_fuse_tests {
     use super::*;
     use std::path::Path;
-
-    #[test]
-    fn grove_store_path_is_detected() {
-        assert!(path_looks_like_grove_store(Path::new(
-            "/var/lib/grove/repos/app/worktree"
-        )));
-        assert!(!path_looks_like_grove_store(Path::new("/workspace/app")));
-    }
 
     #[test]
     fn mountinfo_prefers_longest_cover_and_skips_unrelated() {
@@ -190,20 +174,18 @@ mod grove_fuse_tests {
     }
 
     #[test]
-    fn is_grove_fuse_mount_matches_store_layout() {
-        assert!(is_grove_fuse_mount(Path::new(
-            "/var/lib/grove/repos/app/worktree"
-        )));
+    fn is_grove_fuse_mount_rejects_plain_paths() {
         assert!(!is_grove_fuse_mount(Path::new("/tmp/not-a-grove-path")));
     }
 
     #[test]
     fn grove_fuse_without_linked_status_forces_git() {
-        let t = resolve_grove_fuse_creation_type(
-            Path::new("/var/lib/grove/repos/app/worktree"),
+        // Mount detection is fstype-only. The rewrite itself is what forces Git
+        let t = resolve_grove_fuse_creation_type_for(
             WorktreeType::Linked,
             false,
             &WorkingTreeMode::CleanAll,
+            Path::new("/tmp/src"),
             "s",
         );
         assert_eq!(t.resolved, WorktreeType::Git);
@@ -228,7 +210,7 @@ mod grove_fuse_tests {
 
     #[test]
     fn grove_fuse_linked_preserve_keeps_linked_not_git() {
-        let src = Path::new("/var/lib/grove/repos/app/worktree");
+        let src = Path::new("/tmp/src");
         assert_eq!(
             resolve_grove_fuse_creation_type_for(
                 WorktreeType::Linked,
@@ -336,10 +318,6 @@ pub(crate) fn to_creation_mode(t: WorktreeType) -> xai_fast_worktree::CreationMo
     }
 }
 
-// ============================================================================
-// Btrfs delegate factory
-// ============================================================================
-
 /// Process-global factory producing the btrfs delegate, if any. Binaries that never register a factory use direct btrfs and, failing that, fall through to the copy path.
 type BtrfsDelegateFactory = Box<dyn Fn() -> Option<Arc<dyn BtrfsDelegate>> + Send + Sync>;
 
@@ -362,10 +340,6 @@ fn get_head_commit(repo: &Repository) -> Result<String> {
     let commit = head.peel_to_commit()?;
     Ok(commit.id().to_string())
 }
-
-// ============================================================================
-// In-progress tracking
-// ============================================================================
 
 // Best-effort dedup of duplicate async spawns within one process
 // NOT a cross-process lock: in proxy mode `prepare` (hub) and creation (shell) are different processes, so correctness does not depend on it
@@ -391,10 +365,6 @@ pub async fn claim_worktree_in_progress(session_id: &str) -> bool {
 pub async fn mark_worktree_complete(session_id: &str) {
     worktree_registry().lock().await.remove(session_id);
 }
-
-// ============================================================================
-// Background Copy Infrastructure
-// ============================================================================
 
 /// Leaves some cores free for foreground work.
 pub const DEFAULT_BG_PARALLELISM: usize = 2;
@@ -592,10 +562,6 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
     }
 }
 
-// ============================================================================
-// Request / Response types
-// ============================================================================
-
 fn default_copy_mode() -> WorktreeCopyMode {
     WorktreeCopyMode::Dirty
 }
@@ -716,10 +682,6 @@ pub trait WorktreeNotificationSender {
     async fn send_worktree_status(&self, progress: WorktreeStatus);
 }
 
-// ============================================================================
-// Human-Readable Worktree Naming
-// ============================================================================
-
 pub const MAX_LABEL_LEN: usize = 64;
 pub const MAX_COLLISION_SUFFIX: u32 = 100;
 
@@ -767,7 +729,10 @@ pub fn truncate_label(s: &str) -> String {
     if s.len() <= MAX_LABEL_LEN {
         return s.to_owned();
     }
-    let truncated = &s[..MAX_LABEL_LEN];
+    let end = s.floor_char_boundary(MAX_LABEL_LEN);
+    let Some(truncated) = s.get(..end) else {
+        return s.to_owned();
+    };
     truncated.trim_end_matches('-').to_owned()
 }
 
@@ -775,7 +740,9 @@ pub fn truncate_label(s: &str) -> String {
 pub fn auto_label() -> String {
     let date = chrono::Local::now().format("%Y-%m-%d");
     let uuid_hex = uuid::Uuid::new_v4().simple().to_string();
-    let short = &uuid_hex[..8];
+    let Some(short) = uuid_hex.get(..8) else {
+        return format!("{date}");
+    };
     format!("{date}-{short}")
 }
 
@@ -808,7 +775,10 @@ pub fn repo_slug(git_root: &Path) -> String {
         return "repo".to_owned();
     }
     let take = 2.min(components.len());
-    let raw = components[components.len() - take..].join("-");
+    let Some(tail) = components.get(components.len() - take..) else {
+        return "repo".to_owned();
+    };
+    let raw = tail.join("-");
     let slug = sanitize_label(&raw);
     if slug.is_empty() {
         "repo".to_owned()
@@ -833,10 +803,6 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
     }
     auto_label()
 }
-
-// ============================================================================
-// Worktree Base Directory Resolution
-// ============================================================================
 
 /// Grok home for worktree paths: the same resolver as `worktrees.db`, with a `temp_dir()/.grok` last resort.
 /// This is not grok-config's cwd-relative `.grok`: worktree paths need an absolute, always-writable anchor that does not move with the process cwd.
@@ -964,10 +930,6 @@ pub fn touch_worktree_for_cwd_in(grok_home: &Path, cwd: &str) {
         tracing::debug!(error = %e, id = %record.id, "worktree touch failed");
     }
 }
-
-// ============================================================================
-// Worktree Lifecycle: Create
-// ============================================================================
 
 pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWorktreeResult {
     let source_path = Path::new(&req.source_path);
@@ -1404,10 +1366,6 @@ pub async fn create_worktree_streaming_in<N: WorktreeNotificationSender>(
     }
 }
 
-// ============================================================================
-// Remove Worktree
-// ============================================================================
-
 pub async fn remove_worktree(
     req: &RemoveWorktreeRequest,
     copy_context: &BackgroundCopyContext,
@@ -1629,10 +1587,6 @@ async fn snapshot_and_remove_subagent_worktree(
     remove_subagent_worktree(worktree_path).await?;
     Ok(snapshot_ref)
 }
-
-// ============================================================================
-// Create Worktree from Existing Worktree (Fork Flow)
-// ============================================================================
 
 /// Used during session forking to create a copy of another worktree's state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2402,10 +2356,6 @@ pub async fn create_worktree_from_worktree_sync(
     })
 }
 
-// ============================================================================
-// Apply Worktree
-// ============================================================================
-
 #[derive(Debug)]
 struct ApplyContext {
     base_commit: String,
@@ -2603,10 +2553,6 @@ pub async fn apply_worktree(req: &ApplyWorktreeRequest) -> Result<ApplyWorktreeR
     }
 }
 
-// ============================================================================
-// Jujutsu workspace isolation
-// ============================================================================
-
 use crate::session::git::{jj_cli, jj_cli_mut};
 
 /// Short commit ID of the working-copy commit in a jj workspace.
@@ -2704,9 +2650,7 @@ pub async fn remove_jj_workspace(workspace_path: &str) -> Result<()> {
     Ok(())
 }
 
-// ============================================================================
 // Resume / Rehydrate types (types only; impl stays in shell)
-// ============================================================================
 
 /// Request to resume an existing session in a fresh worktree.
 ///
@@ -2790,10 +2734,6 @@ pub struct RehydrateSessionResponse {
     pub warnings: Vec<String>,
 }
 
-// ============================================================================
-// Worktree Management / DB
-// ============================================================================
-
 use xai_fast_worktree::{
     DbStats, GcOptions, GcReport, ListFilter, WorktreeAutoGcLayer, WorktreeDb, WorktreeKind,
     WorktreeRecord, gc_worktrees as fw_gc_worktrees, rebuild_worktree_db, resolve_grok_home,
@@ -2811,10 +2751,9 @@ pub fn list_worktrees(
 ) -> Result<Vec<WorktreeRecord>> {
     let db = open_db()?;
 
-    let kind = if types.len() == 1 {
-        Some(WorktreeKind::from_str_lossy(&types[0]))
-    } else {
-        None
+    let kind = match types {
+        [only] => Some(WorktreeKind::from_str_lossy(only)),
+        _ => None,
     };
 
     let filter = ListFilter {
@@ -3063,10 +3002,6 @@ pub fn resolve_worktree_by_id_or_path(id_or_path: &str) -> Result<Option<std::pa
     let p = std::path::PathBuf::from(id_or_path);
     if p.exists() { Ok(Some(p)) } else { Ok(None) }
 }
-
-// ============================================================================
-// Repo-wide candidate enumeration (for worktree resume)
-// ============================================================================
 
 /// Build a deduplicated, deterministically-ordered list of candidate cwds for the same repository as `current_cwd`.
 ///

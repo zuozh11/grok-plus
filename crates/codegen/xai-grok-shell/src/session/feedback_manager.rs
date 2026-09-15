@@ -1602,7 +1602,11 @@ mod tests {
                 let seen_tx = seen_tx.clone();
                 async move {
                     tokio::time::sleep(Duration::from_millis(50)).await;
-                    let _ = seen_tx.send(body["turnNumber"].as_i64().unwrap_or(-1));
+                    let _ = seen_tx.send(
+                        body.get("turnNumber")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(-1),
+                    );
                     Json(serde_json::json!({
                         "sessionId": "test-fifo",
                         "turnNumber": 0,
@@ -2096,10 +2100,19 @@ email = ["$GROK_TEST_WORK_EMAIL"]
 
         // Author identity rides on the same submission as the rest of the feedback; nothing is stripped here
         let body = captured.lock().clone().expect("server saw the POST");
-        assert_eq!(body["authorName"], "Ada Lovelace");
-        assert_eq!(body["authorEmail"], "ada@corp.example");
-        assert_eq!(body["modelId"], "grok-4");
-        assert_eq!(body["feedbackText"], "great session");
+        assert_eq!(
+            body.get("authorName"),
+            Some(&serde_json::json!("Ada Lovelace"))
+        );
+        assert_eq!(
+            body.get("authorEmail"),
+            Some(&serde_json::json!("ada@corp.example"))
+        );
+        assert_eq!(body.get("modelId"), Some(&serde_json::json!("grok-4")));
+        assert_eq!(
+            body.get("feedbackText"),
+            Some(&serde_json::json!("great session"))
+        );
 
         // The local entry keeps the author fields and the full context.
         let msg = rx.try_recv().expect("persistence entry was sent");
@@ -2143,7 +2156,10 @@ email = ["$GROK_TEST_WORK_EMAIL"]
         assert!(matches!(outcome, SubmitOutcome::Submitted));
 
         let body = captured.lock().clone().expect("server saw the POST");
-        assert_eq!(body["metadata"]["team"], "platform-tools");
+        assert_eq!(
+            body.get("metadata").and_then(|m| m.get("team")),
+            Some(&serde_json::json!("platform-tools"))
+        );
 
         let msg = rx.try_recv().expect("persistence entry was sent");
         let PersistenceMsg::Feedback(LocalFeedbackEntry::UserFeedback(entry)) = msg else {
@@ -2151,8 +2167,8 @@ email = ["$GROK_TEST_WORK_EMAIL"]
         };
         let persisted = entry.submission.expect("submission persisted");
         assert_eq!(
-            persisted.metadata.expect("metadata merged before persist")["team"],
-            "platform-tools"
+            persisted.metadata.as_ref().and_then(|m| m.get("team")),
+            Some(&serde_json::json!("platform-tools"))
         );
     }
 
@@ -2193,8 +2209,15 @@ email = ["$GROK_TEST_WORK_EMAIL"]
         assert!(matches!(outcome, SubmitOutcome::Submitted));
 
         let body = captured.lock().clone().expect("server saw the POST");
-        assert_eq!(body["metadata"]["structured_feedback"], envelope);
-        assert_eq!(body["metadata"]["team"], "platform-tools");
+        assert_eq!(
+            body.get("metadata")
+                .and_then(|m| m.get("structured_feedback")),
+            Some(&envelope)
+        );
+        assert_eq!(
+            body.get("metadata").and_then(|m| m.get("team")),
+            Some(&serde_json::json!("platform-tools"))
+        );
 
         // A report without the envelope must not grow one from the environment either.
         *captured.lock() = None;
@@ -2212,8 +2235,15 @@ email = ["$GROK_TEST_WORK_EMAIL"]
         .await;
         assert!(matches!(outcome, SubmitOutcome::Submitted));
         let body = captured.lock().clone().expect("server saw the POST");
-        assert!(body["metadata"].get("structured_feedback").is_none());
-        assert_eq!(body["metadata"]["team"], "platform-tools");
+        assert!(
+            body.get("metadata")
+                .and_then(|m| m.get("structured_feedback"))
+                .is_none()
+        );
+        assert_eq!(
+            body.get("metadata").and_then(|m| m.get("team")),
+            Some(&serde_json::json!("platform-tools"))
+        );
     }
 
     #[tokio::test]

@@ -177,7 +177,6 @@ pub struct WorktreeReport {
     pub strategy_metadata: Option<serde_json::Value>,
     /// Arms that declined before the one that ran.
     pub skipped: Vec<crate::ArmSkip>,
-    /// Grove daemon capability class: `current`, `old`, or `unknown`.
     pub daemon_capability_class: Option<&'static str>,
 }
 

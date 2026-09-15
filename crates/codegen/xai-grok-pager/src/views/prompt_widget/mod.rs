@@ -585,7 +585,9 @@ impl StashedPrompt {
             }
             chip.range = chip.range.start - start..chip.range.end - start;
             if chip.kind == KIND_IMAGE
-                && let Some(number) = parse_image_display_number(&text[chip.range.clone()])
+                && let Some(number) = text
+                    .get(chip.range.clone())
+                    .and_then(parse_image_display_number)
             {
                 image_numbers.insert(number);
             }
@@ -1162,18 +1164,6 @@ impl PromptWidget {
         self.update_file_search_context();
     }
 
-    /// Insert plain text at the start without replacing existing chip elements; the cursor lands after it.
-    pub fn prepend_text(&mut self, text: &str) {
-        if text.is_empty() {
-            return;
-        }
-        self.post_insert_image_preview = None;
-        self.hovered_image_element_id = None;
-        self.set_cursor(0);
-        self.textarea.insert_str(text);
-        self.update_file_search_context();
-    }
-
     // -- Slash command state sync -------------------------------------------
 
     pub fn set_slash_current_title(&mut self, title: Option<String>) {
@@ -1353,7 +1343,11 @@ impl PromptWidget {
                 {
                     // The row's trailing space is its args separator; absorb an existing plain-text one. Absorbing
                     // (rather than trimming the insert) lands the cursor after the separator, in the args phase.
-                    let next_is_plain_space = self.textarea.text()[range.end..].starts_with(' ')
+                    let next_is_plain_space = self
+                        .textarea
+                        .text()
+                        .get(range.end..)
+                        .is_some_and(|s| s.starts_with(' '))
                         && !self
                             .textarea
                             .elements()
@@ -1517,8 +1511,12 @@ impl PromptWidget {
     fn parse_file_ref_element(text: &str) -> (String, Option<std::ops::Range<usize>>) {
         let text = text.strip_prefix('@').unwrap_or(text);
         if let Some(colon_pos) = text.rfind(':') {
-            let path = &text[..colon_pos];
-            let range_str = &text[colon_pos + 1..];
+            let Some(path) = text.get(..colon_pos) else {
+                return (text.to_owned(), None);
+            };
+            let Some(range_str) = text.get(colon_pos + 1..) else {
+                return (text.to_owned(), None);
+            };
             if let Some(range) = parse_line_range(range_str) {
                 return (path.to_owned(), Some(range));
             }
@@ -2626,7 +2624,9 @@ impl PromptWidget {
         else {
             return;
         };
-        let element_id = self.images[position].element_id;
+        let Some(element_id) = self.images.get(position).map(|image| image.element_id) else {
+            return;
+        };
         if let Some(range) = self
             .textarea
             .elements()
@@ -2997,12 +2997,17 @@ impl PromptWidget {
         ])
         .split(content_area);
 
-        let text_area_rect = chunks[1];
+        let Some(&text_area_rect) = chunks.get(1) else {
+            return PromptRenderResult {
+                cursor_pos: None,
+                post_flush_escapes: None,
+            };
+        };
 
         // Top divider: ╭──────────╮
         if vpad_top > 0 && style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
-            let div_y = chunks[0].y;
+            let div_y = chunks.first().map(|c| c.y).unwrap_or(area.y);
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);
             for x in area.x..area.x + area.width {
@@ -3207,8 +3212,8 @@ impl PromptWidget {
                     Some(sel) => (
                         std::borrow::Cow::Owned(format!(
                             "{}{}",
-                            &text[..sel.start],
-                            &text[sel.end..]
+                            text.get(..sel.start).unwrap_or(""),
+                            text.get(sel.end..).unwrap_or("")
                         )),
                         sel.start,
                         sel.end,
@@ -3293,8 +3298,13 @@ impl PromptWidget {
         // Bottom divider: ╰──────────grok-3 · flags──╯
         // Guard on actual allocated height, not requested `info_block`
         // During resize the layout may squeeze the info block to 0 rows, leaving chunks[2].y past the buffer boundary
-        if info_block > 0 && style.chrome && style.show_borders && chunks[2].height > 0 {
-            let div_y = chunks[2].y;
+        if info_block > 0
+            && style.chrome
+            && style.show_borders
+            && let Some(info_chunk) = chunks.get(2)
+            && info_chunk.height > 0
+        {
+            let div_y = info_chunk.y;
             let div_style = Style::default().fg(border_color).bg(bg);
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);
@@ -3572,7 +3582,10 @@ fn parse_line_range(s: &str) -> Option<std::ops::Range<usize>> {
 pub fn file_ref_display(path: &str) -> Line<'static> {
     let theme = Theme::current();
     let (file_part, line_part) = if let Some(colon_pos) = path.rfind(':') {
-        (&path[..colon_pos], Some(&path[colon_pos + 1..]))
+        (
+            path.get(..colon_pos).unwrap_or(path),
+            path.get(colon_pos + 1..),
+        )
     } else {
         (path, None)
     };

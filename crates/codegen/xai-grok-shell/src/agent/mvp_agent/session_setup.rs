@@ -180,6 +180,19 @@ fn session_info_for(session_id: &acp::SessionId, cwd: &AbsPathBuf) -> SessionInf
         cwd: cwd.as_str().to_owned(),
     }
 }
+/// The liveness bump runs on every call, before the sweep and before this session is loaded:
+/// another process's sweep may be judging the dir right now, and it only sees mtimes.
+fn spawn_session_sweep(session_info: &SessionInfo) {
+    use crate::session::persistence;
+    let live_session_dir = persistence::session_dir(session_info);
+    persistence::mark_session_live(&live_session_dir);
+    if persistence::session_sweep_done() {
+        return;
+    }
+    tokio::task::spawn_blocking(move || {
+        persistence::cleanup_stale_sessions(&live_session_dir);
+    });
+}
 fn log_session_started(
     session_id: &acp::SessionId,
     kind: SessionStartKind,
@@ -385,6 +398,7 @@ impl MvpAgent {
                     .map(|s| s.to_string())
             });
         let session_info = session_info_for(&session_id, &cwd);
+        spawn_session_sweep(&session_info);
         let mut model_agent_type: Option<String> = None;
         let mut session_sampling_override: Option<SamplingConfig> = None;
         let mut disallowed_custom: Option<String> = None;
@@ -494,8 +508,8 @@ impl MvpAgent {
                 .unwrap_or_else(|| self.models_manager.current_model_id()),
         };
         let session_model_id = model_id.clone();
-        let persistence = if is_chat_kind {
-            crate::session::persistence::PersistenceHandle::noop()
+        let (persistence, root_identity) = if is_chat_kind {
+            (crate::session::persistence::PersistenceHandle::noop(), None)
         } else {
             let _timer = crate::instrumentation_timer!("session.persistence_init");
             let registry_title_sync = self.registry_title_sync();
@@ -515,6 +529,7 @@ impl MvpAgent {
                 },
             )
             .await
+            .map(|(persistence, identity)| (persistence, Some(identity)))
             .map_err(|e| crate::session::persistence::io_error_to_acp(&e))?
         };
         self.set_turn_number(&session_id, 0u64);
@@ -545,6 +560,13 @@ impl MvpAgent {
                     initial_client_mcp_servers,
                     mcp_meta_config_map,
                     persistence,
+                    root_identity: root_identity.and_then(|identity| {
+                        super::agent_directory::PendingRootIdentity::parse(
+                            identity,
+                            crate::agent::roster::RosterOrigin::Local,
+                        )
+                    }),
+                    attach_waiter: None,
                     chat_history,
                     rewind_points_file_path: None,
                     initial_total_tokens: 0,
@@ -791,8 +813,12 @@ impl MvpAgent {
         op: AttachOperation,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let attach_started_at = std::time::Instant::now();
-        let _load_guard = self.begin_session_load(&arguments.session_id);
+        let load_guard = self.begin_session_load(&arguments.session_id);
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
+        let live_cwd = AbsPathBuf::new(arguments.cwd.clone())
+            .map_err(|e| acp::Error::invalid_params().data(e.to_string()))?;
+        let session_info = session_info_for(&arguments.session_id, &live_cwd);
+        spawn_session_sweep(&session_info);
         self.sweep_dead_sessions();
         if !self.is_resident(&arguments.session_id) {
             self.drain_old_session_thread(&arguments.session_id).await;
@@ -840,11 +866,6 @@ impl MvpAgent {
                 crate::session::worktree_pool::cleanup_stale_pool_worktrees(Some(&root));
             });
         }
-        let session_info = session_info_for(&session_id, &cwd);
-        let current_session_dir = crate::session::persistence::session_dir(&session_info);
-        tokio::task::spawn_blocking(move || {
-            crate::session::persistence::cleanup_stale_sessions(Some(&current_session_dir));
-        });
         let session_exists = self.is_resident(&session_id);
         let no_replay = policy.no_replay;
         if session_exists {
@@ -931,6 +952,28 @@ impl MvpAgent {
         spawn_sampler_transport_prewarm(&persisted_base_url);
         let restored =
             RestoredSignals::read(persisted_signals.as_ref(), persisted_plan_mode.as_ref());
+        let _persisted_root_identity = match (
+            summary
+                .agent_id
+                .as_deref()
+                .and_then(xai_message_delivery_core::AgentId::parse),
+            summary
+                .attempt_id
+                .as_deref()
+                .and_then(xai_message_delivery_core::AttemptId::parse),
+        ) {
+            (Some(agent_id), Some(attempt_id)) => {
+                Some(super::agent_directory::PendingRootIdentity {
+                    agent_id,
+                    attempt_id,
+                    origin: crate::agent::roster::RosterOrigin::Local,
+                })
+            }
+            _ => {
+                tracing::warn!(session_id = %session_id.0, "persisted session identity was missing or invalid");
+                None
+            }
+        };
         self.set_turn_number(&session_id, summary.next_trace_turn);
         tracing::info!(
             session_id = %session_id.0,
@@ -1023,6 +1066,18 @@ impl MvpAgent {
                 session_id = %session_id.0,
                 "load_session: spawning new session actor (session not in memory)"
             );
+            let minted_identity = crate::session::persistence::mint_loaded_session_identity(
+                summary.agent_id.as_deref(),
+            );
+            let cold_root_identity = super::agent_directory::PendingRootIdentity::parse(
+                minted_identity.clone(),
+                crate::agent::roster::RosterOrigin::Local,
+            );
+            let _ = persistence.tx.send(
+                crate::session::persistence::PersistenceMsg::SetRemoteAgentId(
+                    minted_identity.agent_id.clone(),
+                ),
+            );
             let mut spawn_timer = crate::instrumentation_timer!("session.spawn");
             spawn_timer.with_field("session_id", session_id.0.as_ref());
             spawn_timer.with_subphase(xai_grok_telemetry::startup::Subphase::SessionSpawn);
@@ -1038,8 +1093,7 @@ impl MvpAgent {
                     .ok()
                     .map(|m| m.info().agent_type.clone())
             });
-            let persistence_tx = persistence.tx.clone();
-            let won_cold_spawn = self
+            let load_is_current = self
                 .spawn_and_register_session(
                     init,
                     SessionSpawnOptions {
@@ -1049,6 +1103,8 @@ impl MvpAgent {
                         initial_client_mcp_servers,
                         mcp_meta_config_map,
                         persistence,
+                        root_identity: cold_root_identity,
+                        attach_waiter: Some(&load_guard.rx),
                         chat_history,
                         rewind_points_file_path,
                         initial_total_tokens,
@@ -1080,35 +1136,8 @@ impl MvpAgent {
                     )),
                 )
                 .await?;
-            let agent_id = if won_cold_spawn {
-                crate::session::persistence::persist_cold_spawn_identity(
-                    &summary.info,
-                    summary.agent_id.as_deref(),
-                )
-                .await
-                .map(|identity| Some(identity.agent_id))
-            } else {
-                crate::session::persistence::persisted_agent_id(&summary.info).await
-            };
-            match agent_id {
-                Ok(Some(agent_id)) => {
-                    let resident_tx = self
-                        .resident_handle(&session_id)
-                        .map(|handle| handle.persistence_tx.clone())
-                        .unwrap_or(persistence_tx);
-                    let _ = resident_tx.send(
-                        crate::session::persistence::PersistenceMsg::SetRemoteAgentId(agent_id),
-                    );
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
-                        session_id = %session_id.0,
-                        error = %err,
-                        won_cold_spawn,
-                        "failed to persist identity after cold spawn"
-                    );
-                }
+            if !load_is_current {
+                return Err(acp::Error::invalid_params().data("session load was superseded"));
             }
             self.prewarm_final_model_base_url(
                 &session_id,
@@ -1118,6 +1147,7 @@ impl MvpAgent {
             drop(spawn_timer);
             true
         } else {
+            self.await_adopted_identity_stamp(&session_id).await?;
             tracing::info!(
                 session_id = %session_id.0,
                 mcp_server_count = mcp_servers.len(),

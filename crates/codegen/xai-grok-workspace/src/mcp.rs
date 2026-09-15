@@ -19,6 +19,7 @@ use xai_grok_mcp::servers::{
     InitClaimGuard, MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides, McpSpawnCtx,
     OauthInteractivity, SharedMcpState, parse_mcp_qualified_name,
 };
+use xai_grok_tools::util::mcp_structured_content::render_structured_content;
 use xai_tool_protocol::{SessionId, ToolId};
 use xai_tool_runtime::{ToolCallContext, ToolStream, TypedToolOutput};
 use xai_tool_types::ToolDescription;
@@ -161,28 +162,40 @@ impl McpTransport for McpClientTransportAdapter {
             .await
             .map_err(|e| xai_computer_hub_mcp_adapter::McpError::Transport(e.to_string()))?;
 
-        Ok(McpCallResult {
-            content: result
-                .content
-                .into_iter()
-                .map(|c| match c {
-                    rmcp::model::ContentBlock::Text(t) => McpContent::Text { text: t.text },
-                    rmcp::model::ContentBlock::Image(img) => McpContent::Image {
-                        mime_type: img.mime_type,
-                        data: img.data,
-                    },
-                    _ => McpContent::Text {
-                        text: "[unsupported content type]".to_string(),
-                    },
-                })
-                .collect(),
-            is_error: result.is_error.unwrap_or(false),
-        })
+        Ok(mcp_call_result_from_rmcp(result))
     }
 
     async fn close(&self) -> Result<(), xai_computer_hub_mcp_adapter::McpError> {
         // No-op: cleanup happens when McpClient is dropped.
         Ok(())
+    }
+}
+
+/// `McpCallResult` has no structured field, so `structuredContent` rides as a trailing text block.
+fn mcp_call_result_from_rmcp(result: rmcp::model::CallToolResult) -> McpCallResult {
+    let mut content: Vec<McpContent> = result
+        .content
+        .into_iter()
+        .map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => McpContent::Text { text: t.text },
+            rmcp::model::ContentBlock::Image(img) => McpContent::Image {
+                mime_type: img.mime_type,
+                data: img.data,
+            },
+            _ => McpContent::Text {
+                text: "[unsupported content type]".to_string(),
+            },
+        })
+        .collect();
+    let texts = content.iter().filter_map(|c| match c {
+        McpContent::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    let structured = render_structured_content(result.structured_content.as_ref(), texts);
+    content.extend(structured.map(|text| McpContent::Text { text }));
+    McpCallResult {
+        content,
+        is_error: result.is_error.unwrap_or(false),
     }
 }
 
@@ -458,10 +471,9 @@ pub(crate) async fn drive_server_starts(
     // Sizing to the raw deadline would let a swallowed probe burn the legacy phase's window and convert per-server errors into the generic discovery-timeout failure.
     let deadline_secs = discovery_timeout
         .as_secs()
-        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0))
-        .max(1);
+        .saturating_add(u64::from(discovery_timeout.subsec_nanos() != 0));
     let startup_timeout_sec =
-        xai_grok_mcp::servers::McpClient::max_startup_within_deadline(deadline_secs).max(1);
+        xai_grok_mcp::servers::McpClient::max_startup_within_deadline(deadline_secs);
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(startup_timeout_sec),
         ..Default::default()
@@ -643,7 +655,10 @@ pub(crate) fn dedupe_servers_last_wins(servers: &mut Vec<agent_client_protocol::
     // Iterate from the back so the LAST occurrence of each name is the one
     // kept, preserving its position.
     for index in (0..servers.len()).rev() {
-        let name = xai_grok_mcp::servers::mcp_server_name(&servers[index]).to_owned();
+        let Some(server) = servers.get(index) else {
+            continue;
+        };
+        let name = xai_grok_mcp::servers::mcp_server_name(server).to_owned();
         if !seen.insert(name) {
             servers.remove(index);
             dropped += 1;
@@ -1164,6 +1179,51 @@ mod tests {
         assert_eq!(handler.description().name, "server__lookup");
     }
 
+    fn bridged_texts(result: rmcp::model::CallToolResult) -> Vec<String> {
+        mcp_call_result_from_rmcp(result)
+            .content
+            .into_iter()
+            .map(|c| match c {
+                McpContent::Text { text } => text,
+                other => panic!("expected text block, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bridged_result_appends_structured_content_after_a_summary() {
+        let folders = serde_json::json!({"folders": [{"id": "p1", "name": "Alpha"}]});
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                "7 product folders, 2 custom folders",
+            )]);
+        result.structured_content = Some(folders.clone());
+        assert_eq!(
+            bridged_texts(result),
+            vec![
+                "7 product folders, 2 custom folders".to_string(),
+                folders.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn bridged_result_does_not_duplicate_inlined_structured_content() {
+        let folders = serde_json::json!({"folders": [{"id": "p1", "name": "Alpha"}]});
+        let mut result = rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("7 product folders, 2 custom folders"),
+            rmcp::model::ContentBlock::text(folders.to_string()),
+        ]);
+        result.structured_content = Some(folders.clone());
+        assert_eq!(
+            bridged_texts(result),
+            vec![
+                "7 product folders, 2 custom folders".to_string(),
+                folders.to_string()
+            ]
+        );
+    }
+
     /// The client-driven configure path honors the SAME server cap as the
     /// machine-owned chokepoint — `cap_servers` is the one helper both run, keeping
     /// the first entries in config order (matching `BindMcpConfig::new`'s documented cap semantics).
@@ -1179,14 +1239,15 @@ mod tests {
         let mut servers: Vec<_> = (0..over).map(|i| http(&format!("server-{i:03}"))).collect();
         cap_servers(&mut servers);
         assert_eq!(crate::config::BindMcpConfig::MAX_SERVERS, servers.len());
+        let Some(last) = servers.last() else {
+            panic!("expected capped servers");
+        };
         assert_eq!(
             format!(
                 "server-{:03}",
                 crate::config::BindMcpConfig::MAX_SERVERS - 1
             ),
-            xai_grok_mcp::servers::mcp_server_name(
-                &servers[crate::config::BindMcpConfig::MAX_SERVERS - 1]
-            ),
+            xai_grok_mcp::servers::mcp_server_name(last),
         );
     }
 

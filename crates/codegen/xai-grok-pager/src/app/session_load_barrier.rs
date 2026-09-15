@@ -320,6 +320,7 @@ mod tests {
             agent_id: AgentId(id),
             session_id: sid(session),
             models: None,
+            modes: None,
             code_restored: false,
             restore_summary: None,
             restore_degree: None,

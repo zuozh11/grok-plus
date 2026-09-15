@@ -309,8 +309,13 @@ impl HeadlessEmitter {
             "sessionId": session_id,
             "requestId": request_id
         });
-        if !self.thought_buffer.is_empty() {
-            result["thought"] = serde_json::Value::String(self.thought_buffer.clone());
+        if !self.thought_buffer.is_empty()
+            && let Some(obj) = result.as_object_mut()
+        {
+            obj.insert(
+                "thought".into(),
+                serde_json::Value::String(self.thought_buffer.clone()),
+            );
         }
         if let Some(usage) = &self.usage {
             attach_result_usage(&mut result, usage);
@@ -513,17 +518,25 @@ fn build_headless_init_request(
         "clientType": HEADLESS_CLIENT_TYPE,
         "clientVersion": PAGER_CLIENT_VERSION,
     });
-    if let Some(rules) = rules {
-        meta["rules"] = serde_json::json!(rules);
+    if let Some(obj) = meta.as_object_mut() {
+        if let Some(rules) = rules {
+            obj.insert("rules".into(), serde_json::json!(rules));
+        }
+        if let Some(system_prompt_override) = system_prompt_override {
+            obj.insert(
+                "systemPromptOverride".into(),
+                serde_json::json!(system_prompt_override),
+            );
+        }
+        obj.insert(
+            "startupHints".into(),
+            serde_json::json!({
+                "nonInteractive": true,
+                "skipGitStatus": true,
+                "skipProjectLayout": true,
+            }),
+        );
     }
-    if let Some(system_prompt_override) = system_prompt_override {
-        meta["systemPromptOverride"] = serde_json::json!(system_prompt_override);
-    }
-    meta["startupHints"] = serde_json::json!({
-        "nonInteractive": true,
-        "skipGitStatus": true,
-        "skipProjectLayout": true,
-    });
 
     acp::InitializeRequest::new(acp::ProtocolVersion::V1)
         .client_capabilities(
@@ -646,7 +659,12 @@ async fn fork_then_open(
     let mut payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree);
     // Shared helper stamps `fork` for interactive `/fork`
     // `-p` children must stay headless: the load path below never restamps
-    payload["sessionKind"] = serde_json::Value::String("headless".into());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "sessionKind".into(),
+            serde_json::Value::String("headless".into()),
+        );
+    }
     let fork_params = serde_json::value::to_raw_value(&payload)
         .map_err(|e| anyhow::anyhow!("serialize fork params: {e}"))?;
     let req = acp::ExtRequest::new("x.ai/session/fork", fork_params.into());

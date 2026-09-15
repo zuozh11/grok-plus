@@ -69,7 +69,7 @@ fn initial_injection_backend_params_preserve_default_zero_min_score() {
     assert!((0.0 - effective_min_score as f32).abs() < f32::EPSILON);
 }
 #[allow(clippy::field_reassign_with_default)]
-async fn create_test_actor_with_memory(
+pub(super) async fn create_test_actor_with_memory(
     total_tokens: u64,
     context_window: u64,
     threshold_percent: u8,
@@ -120,22 +120,10 @@ async fn create_test_actor_with_memory(
         vec![],
         xai_grok_sampling_types::SamplingConfig {
             base_url: "http://localhost".to_string(),
-            mtls_cert_dir: None,
             model: "test".to_string(),
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            max_retries: None,
-            rate_limit_retry_threshold: None,
-            api_backend: Default::default(),
-            extra_headers: Default::default(),
-            conversation_group_id: None,
-            query_params: Default::default(),
-            env_http_headers: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
-            reasoning_effort: None,
-            stream_tool_calls: None,
+            ..Default::default()
         },
         Box::new(xai_chat_state::NullChatPersistence),
         chat_event_tx,
@@ -216,6 +204,9 @@ async fn create_test_actor_with_memory(
         },
         memory: crate::session::memory_state::SessionMemory {
             configured_mode: memory_config.as_ref().map(|mc| mc.mode),
+            v2_config: memory_config
+                .as_ref()
+                .map_or_else(Default::default, |mc| mc.v2),
             configured_storage: configured_storage.filter(|storage| {
                 storage.mode().is_v2()
                     || memory_config.as_ref().is_some_and(|config| config.enabled)
@@ -231,7 +222,10 @@ async fn create_test_actor_with_memory(
                     },
                     |mc| mc.flush.clone(),
                 ),
-            is_flushing: std::sync::atomic::AtomicBool::new(false),
+            is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            capture_worker: std::cell::RefCell::new(None),
+            dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+            last_capture_failure: std::cell::RefCell::new(None),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
             storage: std::cell::RefCell::new(memory_storage),
             save_on_end: memory_config
@@ -263,6 +257,7 @@ async fn create_test_actor_with_memory(
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
             dream_error_count: std::sync::atomic::AtomicU64::new(0),
+            token_totals: Default::default(),
         },
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
@@ -621,7 +616,8 @@ async fn v2_session_is_pinned_to_isolated_storage_and_disables_legacy_pipeline()
                     .memory
                     .dream_count
                     .load(std::sync::atomic::Ordering::Relaxed),
-                0
+                1,
+                "the v2 Dream route should report a neutral no-work outcome"
             );
             assert!(!actor.memory.flush_config.enabled);
             assert_eq!(actor.idle_flush_timeout, None);
@@ -644,16 +640,44 @@ async fn v2_session_is_pinned_to_isolated_storage_and_disables_legacy_pipeline()
                 std::fs::read_to_string(legacy_root.join("MEMORY.md")).unwrap(),
                 "legacy sentinel"
             );
+            let late_sample_cancelled = std::rc::Rc::new(std::cell::Cell::new(None));
+            actor.memory.dream_workers.track(tokio::task::spawn_local({
+                let actor = std::sync::Arc::clone(&actor);
+                let late_sample_cancelled = std::rc::Rc::clone(&late_sample_cancelled);
+                async move {
+                    let cancel = actor.memory.dream_workers.cancellation_token();
+                    late_sample_cancelled.set(Some(cancel.is_cancelled()));
+                    cancel.cancelled().await;
+                }
+            }));
             actor
                 .execute_builtin_slash_command(BuiltinAction::MemoryToggle { enabled: false })
                 .await
                 .unwrap();
             assert!(!actor.memory.is_enabled());
             assert_eq!(actor.memory.mode(), Some(crate::config::MemoryMode::V2));
+            assert_eq!(
+                actor.memory.disabled_reason(),
+                Some(crate::extensions::notification::MemoryDisabledReason::SessionToggle),
+            );
+            assert_eq!(
+                late_sample_cancelled.get(),
+                Some(true),
+                "a Dream worker first polled during /memory off must observe cancellation"
+            );
             actor
                 .execute_builtin_slash_command(BuiltinAction::MemoryToggle { enabled: true })
                 .await
                 .unwrap();
+            assert!(
+                !actor
+                    .memory
+                    .dream_workers
+                    .cancellation_token()
+                    .is_cancelled(),
+                "/memory on must not inherit the cancelled Dream token"
+            );
+            assert_eq!(actor.memory.disabled_reason(), None);
             let reenabled_storage = actor.memory.storage().unwrap();
             assert_eq!(reenabled_storage.global_dir(), storage.global_dir());
             assert_eq!(reenabled_storage.workspace_dir(), storage.workspace_dir());
@@ -684,6 +708,10 @@ async fn v2_session_is_pinned_to_isolated_storage_and_disables_legacy_pipeline()
                 disabled_actor
                     .build_local_command_availability(&[])
                     .memory_configured
+            );
+            assert_eq!(
+                disabled_actor.memory.disabled_reason(),
+                Some(crate::extensions::notification::MemoryDisabledReason::SessionToggle),
             );
             let disabled_actor = std::sync::Arc::new(disabled_actor);
             disabled_actor

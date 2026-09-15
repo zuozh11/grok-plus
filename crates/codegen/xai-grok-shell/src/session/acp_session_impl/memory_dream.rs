@@ -99,6 +99,13 @@ impl SessionActor {
                 dream_count: telem.dream_count,
                 dream_success_count: telem.dream_success_count,
                 dream_error_count: telem.dream_error_count,
+                capture_prompt_tokens: telem.capture_prompt_tokens,
+                capture_completion_tokens: telem.capture_completion_tokens,
+                capture_cost_usd_ticks: telem.capture_cost_usd_ticks,
+                dream_prompt_tokens: telem.dream_prompt_tokens,
+                dream_completion_tokens: telem.dream_completion_tokens,
+                dream_cost_usd_ticks: telem.dream_cost_usd_ticks,
+                injected_bytes: telem.injected_bytes,
             },
         );
     }
@@ -188,7 +195,7 @@ impl SessionActor {
         let lock = crate::session::memory::dream_lock::DreamLock::new(workspace_dir);
         let sessions_dir = storage.sessions_dir();
         let sid = &self.session_info.id.0;
-        let sid8 = sid[..8.min(sid.len())].to_owned();
+        let sid8 = sid.get(..8.min(sid.len())).unwrap_or(sid).to_owned();
         Some((storage, lock, sessions_dir, sid8))
     }
 
@@ -241,7 +248,11 @@ impl SessionActor {
     }
 
     /// Run dream from the `/dream` slash command, bypassing the time and session gates.
-    pub(super) async fn run_dream_slash_command(&self) {
+    pub(super) async fn run_dream_slash_command(self: &Arc<Self>) {
+        if self.memory.mode() == Some(crate::config::MemoryMode::V2) {
+            self.run_v2_dream_slash_command().await;
+            return;
+        }
         use crate::session::memory::dream_lock::sessions_since;
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {

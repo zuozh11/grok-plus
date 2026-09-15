@@ -1,7 +1,7 @@
 //! Wire names of the hub-synthesized Grok Bot harness tools.
 //!
 //! Single source of truth shared by the hub that registers the tools and
-//! by agent hosts that gate the tools per agent config.
+//! by the clients that gate the tools per agent config.
 
 /// Handwritten harness tool ids: every id a hub may register or Plane may
 /// allowlist. A hub registers a prefix of this list, so an id can be
@@ -46,7 +46,7 @@ pub fn is_grok_bot_default_tool(name: &str) -> bool {
 }
 
 /// Model-facing descriptions, one per [`GROK_BOT_TOOL_IDS`] entry (same
-/// order). The hub registers its tools with these strings, and agent hosts
+/// order). The hub registers its tools with these strings, and clients
 /// use them to advertise opted-in bot tools before the hub connection is
 /// live, so both surfaces render the same text.
 pub const GROK_BOT_TOOL_DESCRIPTIONS: &[(&str, &str)] = &[
@@ -64,7 +64,7 @@ pub const GROK_BOT_TOOL_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "bot_send_prompt",
         "Send a prompt to a Grok Bot agent. Returns once accepted unless mode \
-         waits for the reply. on_busy is reject (default), queue, or supersede. \
+         waits for the reply. on_busy is supersede (default), reject, or queue. \
          After a timeout or a missing notification, resume with bot_await_turn \
          and the returned handle; never re-send. Empty reply with \
          finished:true means no text. A <grok_bot agent_id> tag is that \
@@ -96,8 +96,10 @@ pub const GROK_BOT_TOOL_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "bot_await_turn",
         "Wait for an agent's turn to finish. Pass the handle from \
-         bot_send_prompt to keep waiting after a timeout instead of re-sending. \
-         Without a handle, waits for idle and returns the last message.",
+         bot_send_prompt to keep waiting after a timeout or while its async \
+         wait is pending, instead of re-sending. Without a handle, waits for \
+         the pending turn if one is in flight, otherwise for idle, and \
+         returns the last message.",
     ),
     (
         "bot_search_agents",
@@ -162,12 +164,12 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Wait limit in ms for blocking. Async uses the safety max. Out-of-range values are clamped."
+                    "description": "Omit it. A turn often takes longer than two minutes. Async ignores this."
                 },
                 "on_busy": {
                     "type": "string",
                     "enum": ["reject", "queue", "supersede"],
-                    "description": "reject (default), queue after idle, or supersede the current wait."
+                    "description": "supersede (default) the current wait, reject, or queue after idle."
                 },
                 "paths": {
                     "type": "array",
@@ -283,7 +285,7 @@ pub fn grok_bot_tool_arguments_schema(name: &str) -> Option<serde_json::Value> {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Wait limit in ms; on timeout, finished:false plus a handle to wait again."
+                    "description": "Omit it. On timeout, finished is false; wait again with the handle."
                 }
             }
         }),
@@ -347,7 +349,7 @@ mod tests {
         assert_eq!(
             GROK_BOT_DEFAULT_TOOL_IDS.len(),
             10,
-            "default set size changed; check the surface budget and the agent-host copies of this list"
+            "default set size changed; check the surface budget and every other copy of this list"
         );
         assert_eq!(
             GROK_BOT_DEFAULT_TOOL_IDS,
@@ -362,7 +364,7 @@ mod tests {
         assert!(!is_grok_bot_default_tool("bot_future_tool"));
     }
 
-    /// Agent hosts advertise this schema from the shared table before the
+    /// Clients advertise this schema from the shared table before the
     /// hub bind resolves, so its shape is pinned here rather than only by a
     /// hub's schema goldens.
     #[test]

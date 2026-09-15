@@ -351,6 +351,9 @@ pub(crate) const CTRL_ENTER: &[u8] = b"\x1b[13;5u";
 
 pub(crate) const CTRL_SEMICOLON: &[u8] = b"\x1b[59;5u";
 
+/// Ctrl+\ (OpenDashboard). crossterm maps the raw 0x1c byte to Ctrl+4, so the chord must be sent as kitty CSI-u: code 92 (`\`), modifier 5 (Ctrl).
+pub(crate) const CTRL_BACKSLASH: &[u8] = b"\x1b[92;5u";
+
 /// Wire prefix the shell puts on interjected messages.
 pub(crate) const INTERJECTION_WIRE_PREFIX: &str = "The user sent a message while you were working";
 
@@ -949,6 +952,20 @@ pub(crate) fn plan_lines_duplicated(
         .collect()
 }
 
+/// Drive a full-TUI pager from the welcome screen into a bound session (prompt sent, mock response rendered).
+pub(crate) fn enter_session(harness: &mut PtyHarness, content: &ContentController) {
+    content.set_response(format!("{MOCK_RESPONSE_SENTINEL} session ready."));
+    harness
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .expect("welcome text");
+    harness
+        .inject_keys(format!("{PROMPT}\r").as_bytes())
+        .expect("submit prompt");
+    harness
+        .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
+        .expect("session response rendered");
+}
+
 /// Locate `<grok_home>/sessions/<encoded cwd>/<session id>/`, where the shell keeps the session's `plan.md`.
 /// Polls: the first turn creates it asynchronously.
 pub(crate) fn session_dir(content: &ContentController, harness: &mut PtyHarness) -> PathBuf {
@@ -970,19 +987,184 @@ pub(crate) fn session_dir(content: &ContentController, harness: &mut PtyHarness)
     panic!("no session dir under {}", sessions.display());
 }
 
+/// The session's saved feedback drafts (`feedback_drafts.json` → `drafts`); empty only while the file does not exist yet.
+pub(crate) fn read_feedback_drafts(session_dir: &Path) -> Vec<serde_json::Value> {
+    let path = session_dir.join("feedback_drafts.json");
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("read {}: {error}", path.display()),
+    };
+    serde_json::from_slice::<serde_json::Value>(&raw)
+        .expect("feedback_drafts.json is JSON")
+        .get("drafts")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .expect("feedback_drafts.json has a drafts array")
+}
+
+/// Set a pager up to really POST feedback: writes `user`'s fake OAuth into the sandbox home (an API key alone
+/// makes the shell keep the report local) and returns the env ops that open the shell gate the sandbox baseline
+/// closes.
+pub(crate) fn enable_feedback_posting(
+    content: &ContentController,
+    user: &str,
+) -> Vec<EnvOp<'static>> {
+    seed_fake_oauth(content, user);
+    let mut ops = Vec::from(oauth_credential_ops());
+    ops.push(EnvOp::set("GROK_FEEDBACK_ENABLED", "true"));
+    ops
+}
+
+/// The Write tab's empty-composer placeholder: the one string that says the feedback form is open on Write.
+pub(crate) const FEEDBACK_MODAL_PLACEHOLDER_SENTINEL: &str = "Tell us what happened";
+
+/// Open the feedback form via bare `/feedback` and wait for its Write tab. Paced: a single-shot burst can
+/// land Enter before the composer absorbed the slash filter under remote CI load.
+pub(crate) fn open_feedback_modal(harness: &mut PtyHarness) {
+    inject_keys_paced(harness, b"/feedback");
+    harness.inject_keys(b"\r").expect("submit /feedback");
+    harness
+        .wait_for_text(FEEDBACK_MODAL_PLACEHOLDER_SENTINEL, Duration::from_secs(15))
+        .expect("feedback modal composer should render");
+}
+
+/// Wait for the mock to record the send whose `structured_feedback.source` is `source` (the mock records failed
+/// POSTs too), then return its body; a second post with that source would mean a double send.
+pub(crate) fn wait_for_feedback_post(
+    harness: &mut PtyHarness,
+    content: &ContentController,
+    source: &str,
+) -> serde_json::Value {
+    let posts_from = |content: &ContentController| -> Vec<serde_json::Value> {
+        content
+            .feedback_posts()
+            .into_iter()
+            .map(|post| post.body)
+            .filter(|body| body["metadata"]["structured_feedback"]["source"] == source)
+            .collect()
+    };
+    harness
+        .wait_until(
+            &format!("{source} feedback POST recorded"),
+            Duration::from_secs(15),
+            |_| !posts_from(content).is_empty(),
+        )
+        .expect("the send reaches the mock feedback route");
+    let mut posts = posts_from(content);
+    assert_eq!(
+        1,
+        posts.len(),
+        "exactly one {source} POST per send: {posts:?}"
+    );
+    posts.remove(0)
+}
+
+/// The whole draft-send contract, shared by the minimal and full-TUI cases. Precondition: an idle, bound session
+/// (`session_dir` resolved) with feedback enabled and OAuth seeded ([`enable_feedback_posting`]), and no drafts yet.
+/// The draft is seeded by a scripted failure: the `/feedback <report>` POST fails and the text is kept as one
+/// typeless predraft with a "Saved to Drafts" notice. Bare `/feedback` then opens it from Drafts, a typeless send
+/// is refused, a type is picked and the send lands as a second `POST /v1/feedback` with `source == "draft"`,
+/// after which the drafts file is empty. `Right` from an unset Type lands on `Idea` because the picker treats
+/// unset as index 0 (`Bug`) and steps once. No trace step intercepts the full-TUI Enter: the sandbox baseline
+/// leaves the trace card feature and telemetry off.
+pub(crate) fn drive_draft_send(
+    harness: &mut PtyHarness,
+    content: &ContentController,
+    session_dir: &Path,
+    report: &str,
+) {
+    content.set_feedback_failure(true);
+    inject_keys_paced(harness, format!("/feedback {report}").as_bytes());
+    harness.inject_keys(b"\r").expect("submit inline /feedback");
+    // The notice trails a long error, so it wraps at any width: match it with the line breaks collapsed.
+    harness
+        .wait_until("failed inline send kept", Duration::from_secs(30), |h| {
+            h.full_text()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains("Saved to Drafts")
+        })
+        .expect("a failed inline send is kept as a draft");
+    // The on-disk state a failed `/feedback <report>` send leaves behind: one draft, no type.
+    let drafts = read_feedback_drafts(session_dir);
+    assert_eq!(1, drafts.len(), "one predraft on disk: {drafts:?}");
+    assert_eq!(report, drafts[0]["details"]);
+    assert!(
+        drafts[0].get("type").is_none(),
+        "a predraft carries no type: {drafts:?}"
+    );
+    content.set_feedback_failure(false);
+
+    let draft_row = format!("Unclassified · Other · {report}");
+    inject_keys_paced(harness, b"/feedback");
+    harness.inject_keys(b"\r").expect("submit bare /feedback");
+    harness
+        .wait_for_text(&draft_row, Duration::from_secs(15))
+        .expect("bare /feedback opens on the Drafts tab with the predraft row");
+    harness.inject_keys(b"\r").expect("load the selected draft");
+    harness
+        .wait_for_text("Type: (choose)", Duration::from_secs(15))
+        .expect("the loaded predraft shows its unset Type row");
+    harness.inject_keys(b"\r").expect("send the typeless draft");
+    harness
+        .wait_for_text(
+            "Choose a type before sending this draft.",
+            Duration::from_secs(15),
+        )
+        .expect("a typeless draft is refused in the modal");
+    harness.inject_keys(b"\t").expect("focus the Type row");
+    harness.inject_keys(keys::RIGHT).expect("cycle Type");
+    harness
+        .wait_for_text("Type: Idea", Duration::from_secs(15))
+        .expect("Right from an unset Type lands on Idea");
+    harness.inject_keys(b"\t").expect("back to the composer");
+    harness.inject_keys(b"\r").expect("send the typed draft");
+    harness
+        .wait_until("draft modal closed", Duration::from_secs(30), |h| {
+            !h.contains_text("Type: Idea")
+        })
+        .expect("a successful draft send closes the modal");
+
+    let body = wait_for_feedback_post(harness, content, "draft");
+    let posts = content.feedback_posts();
+    assert_eq!(
+        2,
+        posts.len(),
+        "the failed inline send and the draft send: {posts:?}"
+    );
+    assert!(
+        body["feedbackText"]
+            .as_str()
+            .is_some_and(|text| text.contains(report)),
+        "POST body: {body}"
+    );
+    assert_eq!("tui", body["clientType"], "POST body: {body}");
+    assert_eq!(
+        "idea", body["metadata"]["structured_feedback"]["type"],
+        "POST body: {body}"
+    );
+    harness
+        .wait_until("sent draft deleted", Duration::from_secs(15), |_| {
+            read_feedback_drafts(session_dir).is_empty()
+        })
+        .expect("a sent draft leaves the drafts file");
+    assert!(
+        !harness.contains_text("panicked"),
+        "pager panicked\nscreen:\n{}",
+        harness.screen_contents()
+    );
+}
+
 /// Spawn the pager in minimal mode against `content` at the default size.
 pub(crate) fn spawn_minimal(content: &ContentController) -> PtyHarness {
     spawn_minimal_sized(content, DEFAULT_ROWS, DEFAULT_COLS)
 }
 
-/// Spawn minimal at an explicit terminal size. Without it, `--minimal` silently downgrades to
-/// full-screen inline (the probe times out).
+/// Spawn minimal at an explicit terminal size.
 pub(crate) fn spawn_minimal_sized(content: &ContentController, rows: u16, cols: u16) -> PtyHarness {
-    let binary = pager_binary().expect("resolve pager binary");
-    let mut harness = PtyHarness::spawn_with_content(&binary, rows, cols, content, MINIMAL_ARGS)
-        .expect("spawn minimal pager");
-    harness.set_respond_to_queries(true);
-    harness
+    spawn_minimal_env_ops(content, rows, cols, &[], &[], None)
 }
 
 /// Spawn minimal in an explicit project dir, appending `extra_args` to [`MINIMAL_ARGS`] (e.g.
@@ -994,12 +1176,27 @@ pub(crate) fn spawn_minimal_in_dir(
     extra_args: &[&str],
     cwd: &Path,
 ) -> PtyHarness {
+    spawn_minimal_env_ops(content, rows, cols, extra_args, &[], Some(cwd))
+}
+
+/// The one minimal spawn: [`MINIMAL_ARGS`] plus `extra_args`, sandbox env overrides (e.g. `GROK_FEEDBACK_ENABLED`
+/// for the shell gates the sandbox baseline closes), and an optional project dir.
+pub(crate) fn spawn_minimal_env_ops(
+    content: &ContentController,
+    rows: u16,
+    cols: u16,
+    extra_args: &[&str],
+    ops: &[EnvOp<'_>],
+    cwd: Option<&Path>,
+) -> PtyHarness {
     let binary = pager_binary().expect("resolve pager binary");
     let mut args = MINIMAL_ARGS.to_vec();
     args.extend_from_slice(extra_args);
-    let mut harness =
-        PtyHarness::spawn_with_content_in_dir(&binary, rows, cols, content, &args, Some(cwd))
-            .expect("spawn minimal pager in dir");
+    let mut harness = PtyHarness::spawn_with_content_env_ops_in_dir(
+        &binary, rows, cols, content, &args, ops, cwd,
+    )
+    .expect("spawn minimal pager with env ops");
+    // Without the query responder `--minimal` silently downgrades (the terminal probe times out).
     harness.set_respond_to_queries(true);
     harness
 }
@@ -1015,6 +1212,21 @@ pub(crate) fn wait_minimal_ready(harness: &mut PtyHarness) {
                 harness.screen_contents()
             )
         });
+}
+
+/// Bind an idle minimal pager to a session: prompt sent, mock response rendered, idle status back.
+/// Bare `/feedback` (and every session-scoped command) refuses until this has happened.
+pub(crate) fn bind_minimal_session(harness: &mut PtyHarness, content: &ContentController) {
+    content.set_response(format!("{MOCK_RESPONSE_SENTINEL} minimal ready."));
+    harness
+        .inject_keys(format!("{PROMPT}\r").as_bytes())
+        .expect("submit prompt");
+    harness
+        .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
+        .expect("response rendered");
+    harness
+        .wait_for_text(MINIMAL_IDLE_SENTINEL, Duration::from_secs(30))
+        .expect("turn finished");
 }
 
 /// Quit minimal cleanly. The prompt is always focused (a bare `q` would type into it), so quit is

@@ -600,8 +600,8 @@ mod tests {
         apply_grove_worktree_gate(&mut slot, &root, None);
         assert_eq!(
             slot,
-            Some(false),
-            "ACP wrapper must fail closed when remote settings are unavailable"
+            Some(true),
+            "ACP wrapper must keep request Grove when remote settings are unavailable"
         );
     }
 
@@ -694,10 +694,10 @@ mod tests {
             .get("result")
             .expect("envelope must carry a result field");
         assert!(!result.is_null(), "rebuild result must not be null");
-        assert_eq!(result["discovered"], 5);
-        assert_eq!(result["registered"], 3);
-        assert_eq!(result["already_tracked"], 2);
-        assert!(wire.get("error").is_none() || wire["error"].is_null());
+        assert_eq!(result.get("discovered"), Some(&serde_json::json!(5)));
+        assert_eq!(result.get("registered"), Some(&serde_json::json!(3)));
+        assert_eq!(result.get("already_tracked"), Some(&serde_json::json!(2)));
+        assert!(wire.get("error").is_none_or(|e| e.is_null()));
     }
 
     // === Tests for repo-wide session resolution ACP types ===

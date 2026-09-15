@@ -3,7 +3,7 @@ use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
-use xai_grok_tools::implementations::skills::types::SkillInfo;
+use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 pub(crate) struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
@@ -114,6 +114,7 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             match trimmed.as_str() {
                 "on" | "enable" => BuiltinAction::MemoryToggle { enabled: true },
                 "off" | "disable" => BuiltinAction::MemoryToggle { enabled: false },
+                "status" => BuiltinAction::MemoryStatus,
                 _ => BuiltinAction::MemoryBrowse,
             }
         },
@@ -303,7 +304,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 let (op, run_id) = if first_is_op {
                     (
                         first.to_lowercase(),
-                        trimmed[first.len()..].trim_start().to_string(),
+                        trimmed
+                            .get(first.len()..)
+                            .unwrap_or("")
+                            .trim_start()
+                            .to_string(),
                     )
                 } else if first_is_runs {
                     ("runs".to_string(), String::new())
@@ -316,7 +321,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             } else {
                 BuiltinAction::WorkflowLaunch {
                     name: first.to_string(),
-                    input: trimmed[first.len()..].trim_start().to_string(),
+                    input: trimmed
+                        .get(first.len()..)
+                        .unwrap_or("")
+                        .trim_start()
+                        .to_string(),
                 }
             }
         },
@@ -385,7 +394,7 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CommandAvailability {
     pub feedback: bool,
-    /// Memory backend is enabled AND the active toolset includes `memory_search`/`memory_get`.
+    /// Memory is enabled with v2 filesystem access or legacy `memory_search`/`memory_get` tools.
     /// `/flush` and `/dream` only make sense when the model can later read back what they wrote.
     pub memory: bool,
     /// A legacy backend or v2 storage layout is configured, but not necessarily currently enabled.
@@ -1183,6 +1192,7 @@ pub(crate) struct ParsedSkillRef {
     pub qualified_name: String,
     /// Plugin name if this is a plugin skill.
     pub plugin_name: Option<String>,
+    pub scope: SkillScope,
 }
 #[derive(Debug)]
 pub(super) enum SlashCommandOutcome {
@@ -1242,6 +1252,7 @@ pub(super) enum BuiltinAction {
         text: String,
     },
     MemoryBrowse,
+    MemoryStatus,
     MemoryToggle {
         enabled: bool,
     },
@@ -1289,6 +1300,7 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { .. } => "plugins-update",
             BuiltinAction::Feedback { .. } => "feedback",
             BuiltinAction::MemoryBrowse => "memory",
+            BuiltinAction::MemoryStatus => "memory",
             BuiltinAction::MemoryToggle { .. } => "memory",
             BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalStatus
@@ -1323,6 +1335,7 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { name } => name.is_some(),
             BuiltinAction::Feedback { text } => !text.is_empty(),
             BuiltinAction::MemoryBrowse => false,
+            BuiltinAction::MemoryStatus => true,
             BuiltinAction::MemoryToggle { .. } => true,
             BuiltinAction::GoalSet { .. } => true,
             BuiltinAction::GoalStatus
@@ -1372,11 +1385,18 @@ fn parse_skill_references_with_catalog(
     let bytes = trimmed.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'/' {
+        let Some(&b) = bytes.get(i) else {
+            break;
+        };
+        if b != b'/' {
             i += 1;
             continue;
         }
-        if i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+        if i > 0
+            && i.checked_sub(1)
+                .and_then(|j| bytes.get(j))
+                .is_some_and(|prev| !prev.is_ascii_whitespace())
+        {
             i += 1;
             continue;
         }
@@ -1384,11 +1404,14 @@ fn parse_skill_references_with_catalog(
         if start >= bytes.len() {
             break;
         }
-        let end = trimmed[start..]
-            .find(|c: char| c.is_whitespace())
+        let end = trimmed
+            .get(start..)
+            .and_then(|s| s.find(|c: char| c.is_whitespace()))
             .map(|relative| start + relative)
             .unwrap_or(trimmed.len());
-        let word = &trimmed[start..end];
+        let Some(word) = trimmed.get(start..end) else {
+            break;
+        };
         let hit = if i == 0 {
             catalog.skill_resolvable(word)
         } else {
@@ -1417,10 +1440,15 @@ fn parse_skill_references_with_catalog(
                     .unwrap_or(trimmed.len());
                 ParsedSkillRef {
                     name: hit.typed_name.clone(),
-                    args: trimmed[word_end..args_end].trim().to_string(),
+                    args: trimmed
+                        .get(word_end..args_end)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
                     skill_path: hit.skill.path.clone(),
                     qualified_name: format_skill_name(hit.skill),
                     plugin_name: hit.skill.plugin_name.clone(),
+                    scope: hit.skill.scope,
                 }
             })
             .collect(),
@@ -1436,7 +1464,7 @@ pub(super) async fn build_skill_information_for_refs(
 ) -> Option<String> {
     use xai_grok_tools::implementations::skills::skill::{
         SkillRef, SubstitutionContext, apply_substitutions, build_skill_block,
-        build_skill_information, load_skill_content,
+        build_skill_information, cap_skill_body, load_skill_content,
     };
     let mut skill_blocks: Vec<String> = Vec::new();
     for sk in parsed_skills {
@@ -1445,6 +1473,13 @@ pub(super) async fn build_skill_information_for_refs(
         };
         match load_skill_content(info).await {
             Ok(mut content) => {
+                if cap_skill_body(&mut content) {
+                    tracing::info!(
+                        skill = %sk.name,
+                        path = %info.path,
+                        "skill body truncated at read cap"
+                    );
+                }
                 let skill_dir = std::path::Path::new(&info.path)
                     .parent()
                     .and_then(|p| p.to_str());
@@ -1527,6 +1562,7 @@ pub(super) fn resolve_model_authored_skill(
             skill_path: skill.path.clone(),
             qualified_name: format_skill_name(skill),
             plugin_name: skill.plugin_name.clone(),
+            scope: skill.scope,
         }],
     })
 }
