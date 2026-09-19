@@ -117,9 +117,7 @@ impl AgentConnection {
                     .meta(
                         serde_json::json!({
                             "startupHints": {
-                                "nonInteractive": non_interactive,
-                                "skipGitStatus": true,
-                                "skipProjectLayout": true
+                                "nonInteractive": non_interactive
                             },
                             "clientType": "test-client",
                             "clientVersion": "0.0.0-test"
@@ -252,6 +250,18 @@ impl AgentConnection {
         let raw = serde_json::value::to_raw_value(&params).expect("serialize ext params");
         self.conn
             .ext_method(acp::ExtRequest::new(method, Arc::from(raw)))
+            .await
+    }
+
+    pub(crate) async fn ext_notification(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> acp::Result<()> {
+        let encoded =
+            serde_json::value::to_raw_value(&params).expect("serialize ext notification params");
+        self.conn
+            .ext_notification(acp::ExtNotification::new(method, Arc::from(encoded)))
             .await
     }
 

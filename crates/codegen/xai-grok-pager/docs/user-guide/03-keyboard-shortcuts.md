@@ -505,7 +505,11 @@ focused the same chords jump between turns (see Navigation above).
 > prompt selects every character in the prompt buffer, including pasted
 > image chips. Image chips are always path-free (`[Image #N]`); the
 > filepath (when known) appears only in the image preview overlay on
-> hover or when the cursor is on/right after the chip.
+> hover or when the cursor is on/right after the chip. `[Image #N]` text
+> that comes back as plain text (Ctrl+K then Ctrl+Y, undo, a plain-text
+> paste) re-attaches as a chip while the composer still holds the image;
+> a placeholder for an image it no longer holds is sent as text with a
+> toast saying so.
 
 ### Always available
 

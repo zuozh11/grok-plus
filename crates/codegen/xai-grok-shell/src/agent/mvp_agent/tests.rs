@@ -963,10 +963,10 @@ fn startup_hints_from_meta_prefers_session_request_over_init() {
 }
 #[test]
 fn startup_hints_from_meta_session_object_wins_whole_not_merged() {
-    let session = serde_json::json!({ "startupHints": { "skipGitStatus": true } });
+    let session = serde_json::json!({ "startupHints": { "isSubagent": true } });
     let init = serde_json::json!({ "startupHints": { "nonInteractive": true } });
     let hints = startup_hints_from_meta(session.as_object(), init.as_object());
-    assert!(hints.skip_git_status);
+    assert!(hints.is_subagent);
     assert!(!hints.non_interactive);
 }
 #[test]

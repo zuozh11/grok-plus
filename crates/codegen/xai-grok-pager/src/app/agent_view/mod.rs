@@ -155,6 +155,7 @@ mod links;
 mod media;
 mod modals;
 mod notices;
+pub(crate) use notices::ImagesDroppedBy;
 mod panes;
 mod paste;
 pub(crate) use kept_plan::KeptPlan;
@@ -800,6 +801,14 @@ pub struct AgentView {
     pub(crate) failed_wake_marker_for: Option<String>,
     /// Wake prompts whose terminals landed; a late delta for one must not revive the stop affordance (see `note_streaming_wake_turn`). Cleared at replay-window entry; a queue broadcast naming one as running again removes that entry.
     pub(crate) finished_wake_prompts: std::collections::HashSet<String>,
+    /// Child prompt ids whose terminal marker was already applied.
+    pub(crate) ended_child_prompt_ids: std::collections::HashSet<String>,
+    /// Child prompt ids left for a newer turn. Not yet marked: the terminal still pushes a marker.
+    pub(crate) superseded_child_prompt_ids: std::collections::HashSet<String>,
+    /// `turnStartMs` of a child turn that ended with no prompt id. `None` if that turn had no start.
+    pub(crate) unidentified_child_turn_closed_ms: Option<i64>,
+    /// Prompt id that start belonged to. `None` when the closed turn had no id.
+    pub(crate) unidentified_child_turn_closed_prompt: Option<String>,
     /// The wake turn currently streaming, if any. See [`RunningWakeTurn`].
     pub(crate) running_wake_turn: Option<RunningWakeTurn>,
     pub active_pane: AgentPane,

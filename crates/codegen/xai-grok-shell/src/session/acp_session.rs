@@ -182,6 +182,8 @@ mod length_salvage;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
 use sampler_turn::*;
+#[path = "acp_session_impl/mcp_file_input.rs"]
+mod mcp_file_input;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
@@ -629,9 +631,10 @@ pub(crate) struct PreparedToolCall {
     tool_call_id: acp::ToolCallId,
     /// The tool name as requested by the model.
     tool_name: String,
-    /// The raw arguments string (for post_tool_use hook payload).
+    /// Authored arguments; file references never expand into conversation payloads.
     raw_arguments: String,
-    /// Parsed JSON arguments ready for bridge.call().
+    mcp_file: Option<mcp_file_input::PreparedMcpFile>,
+    /// Authored/recovered arguments; dispatch uses execution_arguments().
     parsed_args: serde_json::Value,
     /// Model ID at time of call.
     model_id: String,
@@ -723,7 +726,8 @@ impl StreamApplySpan {
     }
 }
 pub(crate) struct SessionActor {
-    pub(crate) repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState,
+    /// Git/jj working-tree root for templated first-message prefixes, if any.
+    pub(crate) vcs_root: Option<std::path::PathBuf>,
     pub(crate) session_info: SessionInfo,
     /// Transient turn-retry kill switch, resolved once at spawn; flips apply to new sessions.
     /// Off for subagents in the first release; headless is enforced per turn via `attach_non_interactive`.
@@ -1053,8 +1057,6 @@ pub(crate) struct SessionActor {
     /// Resolved workspace root for hooks: git worktree root if in a git repo, otherwise session cwd.
     /// Used for hook child process cwd, envelope fields, and GROK_WORKSPACE_ROOT env var.
     pub(crate) hook_resolved_workspace_root: String,
-    /// The detected VCS kind for this session's workspace.
-    pub(crate) vcs_kind: xai_grok_workspace::session::git::VcsKind,
     /// Errors from last hook config load (parse failures, etc.).
     pub(crate) hook_load_errors: std::cell::RefCell<Vec<String>>,
     /// Plugin registry snapshot for this session. Updated on `/plugins reload`.

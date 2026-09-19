@@ -45,6 +45,10 @@ Location: `~/.grok/config.toml`. If the file is missing, Grok uses its built-in 
 [cli]
 auto_update = true                     # check for updates on launch
 
+[agent]
+# name = "grok-build"                  # default agent on interactive `grok` (no --plan / --agent-profile)
+# definition = "/path/to/agent.md"     # path wins over name if both are set
+
 [models]
 default = "grok-4.5"                   # model used for new sessions
 web_search = "grok-4.5"                # model used by the web_search tool
@@ -113,6 +117,18 @@ respect_gitignore = false              # default: false; set true to make every 
 # max_parallel_image_gen_calls = 8
 # max_parallel_video_gen_calls = 4
 ```
+
+### Default agent
+
+Interactive `grok` uses `[agent]` in `config.toml` when you do not pass `--plan`, `--ask-user`, or `--agent-profile`:
+
+```toml
+[agent]
+name = "my-custom-agent"
+# definition = "/path/to/agent.md"   # path wins over name
+```
+
+`definition` is a markdown file with YAML frontmatter. `name` is a built-in or discovered agent (`~/.grok/agents/`, `.grok/agents/`). If the named agent is missing, Grok uses `GROK_AGENT`, then the built-in default. `--agent-profile`, `--plan`, and `--ask-user` still override that session. Field list: [26-config-reference.md](26-config-reference.md).
 
 #### Input mode
 

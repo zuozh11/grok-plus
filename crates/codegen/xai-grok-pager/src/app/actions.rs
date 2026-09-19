@@ -168,6 +168,9 @@ pub enum Action {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
+        /// Notice raised while the composer was consumed (a placeholder no image backs); the key
+        /// handler has no `AppView`, so it travels with the send and is queued when it dispatches.
+        image_notice: Option<String>,
     },
     /// Enable session voice mode and start recording (the Ctrl+Space hold-to-talk key-press, on terminals that report key releases).
     /// Start-only, never stops; use [`Self::VoiceStop`], [`Self::VoiceToggle`], or Esc to stop.
@@ -508,6 +511,8 @@ pub enum Action {
     SetTimestamps(bool),
     /// Set timeline sidebar visibility (per-turn tick rail).
     SetTimeline(bool),
+    /// This action saves `[ui].dashboard_preview`.
+    SetDashboardPreview(bool),
     /// Set `[ui].page_flip_on_send` (default ON). Persists via `Effect::PersistSetting`.
     SetPageFlipOnSend(bool),
     /// Set `[ui].confirm_before_rewind` (default ON). Persists via `Effect::PersistSetting`.
@@ -3018,6 +3023,8 @@ pub enum TaskResult {
         minimal_request_id: Option<uuid::Uuid>,
         /// Set when attached images were left out of the side question.
         image_notice: Option<String>,
+        /// Attachments whose bytes could not be loaded; reported by display number.
+        skipped_image_numbers: Vec<usize>,
     },
     /// `x.ai/recap` request acknowledged (fire-and-forget).
     /// The recap itself arrives separately as a `SessionRecap` notification; this only carries a transport error, if any, for logging.

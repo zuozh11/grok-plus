@@ -1962,6 +1962,15 @@ impl SessionActor {
             .on_skill_discovery_compaction()
             .await;
         self.rearm_failed_server_announcements().await;
+        if self
+            .tool_bridge_handle()
+            .toolset()
+            .tool_name_for_kind(xai_grok_tools::types::tool::ToolKind::UseTool)
+            .is_some()
+            && let Some(hint) = self.rendered_mcp_hint().await
+        {
+            self.push_system_reminder_with_tag(&hint, self.reminder_wrapper_tag());
+        }
         self.plan_mode.lock().reset_after_compaction();
         self.persist_plan_mode_state();
         self.dispatch_hook(

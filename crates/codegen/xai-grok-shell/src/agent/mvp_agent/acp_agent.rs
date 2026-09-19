@@ -41,7 +41,11 @@ impl MvpAgent {
         let model = match self.resolve_model_id(&args.model_id) {
             Ok(model) => model,
             Err(_) => {
-                self.models_manager.wait_for_first_catalog().await;
+                self.models_manager
+                    .wait_for_first_catalog(
+                        crate::util::config::resolve_remote_fetch_enabled(),
+                    )
+                    .await;
                 self.resolve_model_id(&args.model_id)?
             }
         };
@@ -2014,7 +2018,7 @@ impl acp::Agent for MvpAgent {
             "x.ai/session/usage" => crate::extensions::usage::handle(self, &args).await,
             crate::extensions::memory::MEMORY_FLUSH_METHOD
             | crate::extensions::memory::MEMORY_DREAM_METHOD
-            | "x.ai/memory/rewrite"
+            | crate::extensions::memory::MEMORY_REWRITE_METHOD
             | crate::extensions::memory::MEMORY_LIST_METHOD
             | crate::extensions::memory::MEMORY_TOGGLE_METHOD
             | crate::extensions::memory::MEMORY_FORGET_METHOD => {

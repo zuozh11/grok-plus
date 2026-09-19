@@ -23,6 +23,12 @@ pub struct CancellationContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
 }
+/// The parent's exact tool schema paired with the selection mode it advertised.
+#[derive(Debug, Clone)]
+pub struct ForkedToolSnapshot {
+    pub specs: Vec<xai_grok_sampling_types::ToolSpec>,
+    pub task_model_selection: crate::agent::remote_config::task_model_policy::TaskModelSelection,
+}
 /// The ways a `/btw` side question can fail.
 /// Kept typed until the ACP boundary so model errors keep their typed rate-limit and auth codes instead of flattening to a string.
 /// `handle_btw` maps them with [`map_sampling_err_to_acp`](crate::sampling::error::map_sampling_err_to_acp).
@@ -632,7 +638,7 @@ pub enum SessionCommand {
     /// Snapshot the session's resolved tool schema (the same list the parent's own turn sends).
     /// A verbatim-fork child can then present a byte-identical tool prefix.
     SnapshotToolDefinitions {
-        respond_to: oneshot::Sender<Vec<xai_grok_sampling_types::ToolSpec>>,
+        respond_to: oneshot::Sender<ForkedToolSnapshot>,
     },
     /// Replace the session's client-registered hooks.
     /// Sent on `load_session` reconnect to a live actor so a client can re-register (or clear) its hooks without a fresh session.

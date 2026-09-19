@@ -26,6 +26,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "show_timestamps",
     "show_timeline",
     "page_flip_on_send",
+    "dashboard_preview",
     "confirm_before_rewind",
     "combine_queued_prompts",
     "follow_up_behavior",
@@ -200,6 +201,9 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("show_timeline", Action::SetTimeline(b)) => {
             assert_eq!(b, expected, "SetTimeline value differs from expected")
+        }
+        ("dashboard_preview", Action::SetDashboardPreview(enabled)) => {
+            assert_eq!(expected, enabled);
         }
         ("page_flip_on_send", Action::SetPageFlipOnSend(b)) => {
             assert_eq!(b, expected, "SetPageFlipOnSend value differs from expected")
@@ -382,6 +386,35 @@ fn space_on_page_flip_on_send_dispatches_typed_setter() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     let default_on = UiConfig::default().page_flip_on_send_enabled();
     assert_set_bool_action(outcome, "page_flip_on_send", !default_on);
+}
+
+#[test]
+fn dashboard_preview_can_be_found_and_toggled_by_keyboard_and_mouse() {
+    for enabled in [true, false] {
+        let mut state = make_state();
+        state.ui_snapshot.dashboard_preview = Some(enabled);
+        let _ = handle_settings_key(&mut state, &press(KeyCode::Char('/')));
+        for c in "dashboard preview".chars() {
+            let _ = handle_settings_key(&mut state, &press(KeyCode::Char(c)));
+        }
+        let _ = handle_settings_key(&mut state, &press(KeyCode::Enter));
+
+        let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
+
+        assert_set_bool_action(outcome, "dashboard_preview", !enabled);
+
+        synth_rects(&mut state);
+        let y = row_idx_for(&state, "dashboard_preview") as u16;
+
+        let outcome = handle_settings_mouse(
+            &mut state,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            72,
+            y,
+        );
+
+        assert_set_bool_action(outcome, "dashboard_preview", !enabled);
+    }
 }
 
 #[test]
@@ -1801,6 +1834,7 @@ fn registry_kind_membership_through_pr_14() {
             "show_timeline",
             "show_timestamps",
             "page_flip_on_send",
+            "dashboard_preview",
             "confirm_before_rewind",
             "combine_queued_prompts",
             "simple_mode",
@@ -1956,6 +1990,7 @@ fn defaults_round_trip_through_registry() {
             "show_timestamps" => SettingValue::Bool(true),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
+            "dashboard_preview" => SettingValue::Bool(true),
             "confirm_before_rewind" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
             "follow_up_behavior" => SettingValue::Enum("queue"),
@@ -2058,6 +2093,7 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetTimestamps(_))
             | SettingsKeyOutcome::Action(Action::SetTimeline(_))
             | SettingsKeyOutcome::Action(Action::SetPageFlipOnSend(_))
+            | SettingsKeyOutcome::Action(Action::SetDashboardPreview(_))
             | SettingsKeyOutcome::Action(Action::SetConfirmBeforeRewind(_))
             | SettingsKeyOutcome::Action(Action::SetCombineQueuedPrompts(_))
             | SettingsKeyOutcome::Action(Action::SetSimpleMode(_))

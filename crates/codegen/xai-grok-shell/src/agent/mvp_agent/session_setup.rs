@@ -693,6 +693,7 @@ impl MvpAgent {
                     persisted_workflow_runs: Vec::new(),
                     persisted_announcement_state: None,
                     session_meta: arguments.meta.as_ref(),
+                    persisted_agent_profile: None,
                     prefetch: None,
                     model_agent_type: model_agent_type.as_deref(),
                     session_model_id,
@@ -1205,11 +1206,23 @@ impl MvpAgent {
                     self.plugin_registry_handle.clone(),
                     request_meta.as_ref(),
                 );
-            let persisted_agent_name: Option<String> = summary.agent_name.clone().or_else(|| {
-                self.resolve_model_id(&summary.current_model_id)
-                    .ok()
-                    .map(|m| m.info().agent_type.clone())
-            });
+            let (restore_profile, restore_model_agent_type): (
+                Option<xai_grok_agent::AgentDefinition>,
+                Option<String>,
+            ) = match summary.persisted_agent() {
+                Some(crate::session::persistence::PersistedAgent::Inline(_)) => {
+                    (summary.agent_profile().cloned(), None)
+                }
+                Some(crate::session::persistence::PersistedAgent::Named(name)) => {
+                    (None, Some(name.clone()))
+                }
+                None => (
+                    None,
+                    self.resolve_model_id(&summary.current_model_id)
+                        .ok()
+                        .map(|m| m.info().agent_type.clone()),
+                ),
+            };
             let load_is_current = self
                 .spawn_and_register_session(
                     init,
@@ -1237,7 +1250,8 @@ impl MvpAgent {
                         persisted_workflow_runs,
                         persisted_announcement_state,
                         session_meta: request_meta.as_ref(),
-                        model_agent_type: persisted_agent_name.as_deref(),
+                        persisted_agent_profile: restore_profile,
+                        model_agent_type: restore_model_agent_type.as_deref(),
                         session_model_id: summary.current_model_id.clone(),
                         initial_reasoning_effort: None,
                         session_yolo_mode,

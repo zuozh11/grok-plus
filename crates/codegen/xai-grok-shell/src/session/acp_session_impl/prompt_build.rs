@@ -2,7 +2,6 @@
 //! Covers the templated prefix, rules partitioning, and image payload preparation; large-prompt offload lives in `prompt_offload`.
 #![allow(clippy::items_after_test_module)]
 use super::*;
-use crate::session::repo_status_prefix::RepoStatusSnapshot;
 /// Replaces anything outside `[A-Za-z0-9._-]` with `_` so the result is a portable directory name on macOS/Linux.
 /// Whether `url` is an `http://` or `https://` URL, one the upstream API can fetch directly.
 /// `file://` and other local schemes are rejected by the API and must be inlined as a `data:` URL instead.
@@ -539,11 +538,10 @@ impl SessionActor {
                 def.include_browser_verification(),
             )
         };
-        let repo_status = self.resolve_repo_status_prefix().await;
         let mut prefix_carries_fallback_date = false;
         let mut out = if !matches!(template, UserMessageTemplate::Default) {
             if let Some(rendered) = self
-                .build_templated_user_message(cwd, template.clone(), repo_status.as_ref())
+                .build_templated_user_message(cwd, template.clone())
                 .await
             {
                 rendered
@@ -552,10 +550,10 @@ impl SessionActor {
                     "templated user message render failed; falling back to legacy prefix"
                 );
                 prefix_carries_fallback_date = !template.surfaces_local_date();
-                self.construct_legacy_prefix(cwd, repo_status.as_ref())
+                self.construct_legacy_prefix(cwd)
             }
         } else {
-            self.construct_legacy_prefix(cwd, repo_status.as_ref())
+            self.construct_legacy_prefix(cwd)
         };
         if matches!(template, UserMessageTemplate::Default) && include_verification {
             let (workspace_rules, mut user_rules) = self.gather_partitioned_rules();
@@ -614,21 +612,17 @@ impl SessionActor {
         partition_rules_by_scope(files, &grok_home, &vendor_homes, &workspace_roots)
     }
     /// Build the custom-templated first user message.
-    /// Gathers session-scoped inputs: today's date, VCS status, AGENTS.md rules, skill registry, and MCP servers.
+    /// Gathers session-scoped inputs: today's date, VCS root, AGENTS.md rules, skill registry, and MCP servers.
     /// Dispatches through `UserMessageContext::render`.
     async fn build_templated_user_message(
         &self,
         cwd: &std::path::Path,
         template: xai_grok_agent::prompt::user_message::UserMessageTemplate,
-        repo_status: Option<&RepoStatusSnapshot>,
     ) -> Option<String> {
         use xai_grok_agent::prompt::user_message::UserMessageContext;
         self.wait_for_mcp_startup_grace().await;
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let (vcs_root, vcs_status) = match repo_status {
-            Some(snapshot) => (snapshot.root.clone(), snapshot.templated_status()),
-            None => (None, None),
-        };
+        let vcs_root = self.vcs_root.clone();
         let (workspace_rules, user_rules) = self.gather_partitioned_rules();
         let mut user_rules = user_rules;
         let skills = self.slash_skills_for_resolve().await;
@@ -657,7 +651,6 @@ impl SessionActor {
             os_family: crate::util::uname::os_kernel_and_release(),
             shell,
             vcs_root,
-            vcs_status,
             today_local: Some(today_local),
             terminals_folder,
             workspace_rules,
@@ -676,55 +669,8 @@ impl SessionActor {
         };
         ctx.render(&bridge).await
     }
-    fn construct_legacy_prefix(
-        &self,
-        cwd: &std::path::Path,
-        repo_status: Option<&RepoStatusSnapshot>,
-    ) -> String {
-        let mut prefix = construct_user_message_minimal(cwd, None);
-        if let Some(status) = repo_status.and_then(|s| s.legacy_status()) {
-            prefix.push_str(&crate::session::user_message::format_vcs_status_block(
-                &status,
-                self.vcs_kind,
-            ));
-        }
-        prefix
-    }
-    async fn resolve_repo_status_prefix(&self) -> Option<RepoStatusSnapshot> {
-        use crate::session::repo_status_prefix::{
-            REPO_STATUS_WAIT_BUDGET, RepoStatusPlan, gather_repo_status,
-        };
-        match self.repo_status_prefetch.plan() {
-            RepoStatusPlan::NoRepo => None,
-            RepoStatusPlan::RootOnly { root, vcs_kind } => {
-                Some(RepoStatusSnapshot::root_only(root.clone(), *vcs_kind))
-            }
-            RepoStatusPlan::Gather { inputs, .. } => {
-                use tracing::Instrument;
-                let wait_start = std::time::Instant::now();
-                let snapshot = match self.repo_status_prefetch.take_prefetch() {
-                    Some(mut prefetch) => {
-                        prefetch
-                            .snapshot_within(REPO_STATUS_WAIT_BUDGET)
-                            .instrument(tracing::info_span!("prompt.repo_status_wait"))
-                            .await
-                    }
-                    None => gather_repo_status(inputs).await,
-                };
-                self.log_repo_status_wait(wait_start.elapsed());
-                Some(snapshot.unwrap_or_else(|| inputs.missed_snapshot()))
-            }
-        }
-    }
-    fn log_repo_status_wait(&self, waited: std::time::Duration) {
-        let wait_ms = self.repo_status_prefetch.record_wait(waited);
-        if wait_ms > 0 {
-            tracing::info!(
-                session_id = %self.session_info.id.0,
-                repo_status_wait_ms = wait_ms,
-                "user prefix waited on the repo status prefetch"
-            );
-        }
+    fn construct_legacy_prefix(&self, cwd: &std::path::Path) -> String {
+        construct_user_message_minimal(cwd, None)
     }
     /// `None` twin: descriptor materialization is unavailable in this build.
     fn workspace_mcps_root(_cwd: &std::path::Path) -> Option<std::path::PathBuf> {

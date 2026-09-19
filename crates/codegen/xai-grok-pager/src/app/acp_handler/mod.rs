@@ -55,12 +55,15 @@ use permissions::{
     should_drop_late_auto_recap,
 };
 
+pub(crate) use routing::task_view_by_session_id;
 use routing::{
     SessionMatch, find_session_match, interaction_target_agent, is_matched_agent_active,
     mcp_target_agent, resolve_notif_agent, resolve_target_view, setup_phase_target_agent,
 };
 
-use prompt_origin::{finish_wake_turn, viewer_turn_anchor};
+use prompt_origin::{
+    backdate_child_turn_clock, finish_wake_turn, note_child_live_prompt, viewer_turn_anchor,
+};
 pub(crate) use prompt_origin::{
     is_scheduler_fired_prompt, is_server_initiated_prompt, is_wake_prompt,
     should_adopt_running_prompt,
@@ -161,6 +164,14 @@ fn ack_prompt_from_update(view: &mut AgentView, meta: &NotificationMeta) {
 }
 
 pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
+    let state_changed = handle_inner(msg, app);
+    // Queue drains driven by session updates run outside any dispatched action. A notice landing on the
+    // visible view from a background session's update is a change even when the update itself was not.
+    let flushed = app.flush_image_notices_if_root();
+    state_changed || flushed
+}
+
+fn handle_inner(msg: AcpClientMessage, app: &mut AppView) -> bool {
     match msg {
         AcpClientMessage::SessionNotification(notif) => {
             let mut meta = NotificationMeta::from_json(notif.request.meta.as_ref());
@@ -456,16 +467,51 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                         if let acp::SessionUpdate::UsageUpdate(ref usage) = notif.request.update {
                             child_view.apply_context_used(usage.used, usage.size);
                         }
-                        if let Some(ts) = meta.turn_start_ms {
-                            child_view.turn_start_ms = Some(ts);
-                        }
-                        child_view.session.handle_update(
-                            notif.request.update,
-                            &meta,
-                            &mut child_view.scrollback,
-                        );
-                        for entry_id in child_view.session.tracker.take_pending_edit_hl() {
-                            child_view.submit_edit_highlight(entry_id);
+                        let ended = !meta.is_replay
+                            && meta.prompt_id.as_deref().is_some_and(|pid| {
+                                child_view.ended_child_prompt_ids.contains(pid)
+                                    || child_view.superseded_child_prompt_ids.contains(pid)
+                            });
+                        if !ended {
+                            let is_live = !meta.is_replay && !child_view.session.loading_replay;
+                            let apply = !is_live
+                                || note_child_live_prompt(
+                                    child_view,
+                                    meta.prompt_id.as_deref(),
+                                    meta.turn_start_ms,
+                                    meta.is_replay,
+                                );
+                            if apply {
+                                if is_live {
+                                    if let Some(ts) = meta.turn_start_ms {
+                                        // Nameless chunks must not replace a named turn's wall
+                                        // anchor. `honest_turn_elapsed` trusts the pair.
+                                        let named = meta
+                                            .prompt_id
+                                            .as_deref()
+                                            .is_some_and(|pid| !pid.is_empty());
+                                        if named
+                                            || child_view.turn_start_ms_prompt.is_none()
+                                            || child_view.turn_start_ms == Some(ts)
+                                        {
+                                            child_view.turn_start_ms = Some(ts);
+                                            if named {
+                                                child_view.turn_start_ms_prompt =
+                                                    meta.prompt_id.clone();
+                                            }
+                                        }
+                                    }
+                                    backdate_child_turn_clock(child_view);
+                                }
+                                child_view.session.handle_update(
+                                    notif.request.update,
+                                    &meta,
+                                    &mut child_view.scrollback,
+                                );
+                                for entry_id in child_view.session.tracker.take_pending_edit_hl() {
+                                    child_view.submit_edit_highlight(entry_id);
+                                }
+                            }
                         }
                         subagent_activity_label(child_view)
                     };

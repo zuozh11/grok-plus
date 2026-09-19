@@ -180,6 +180,14 @@ telemetry_event!(
 telemetry_event!(SubagentLimitHit, "subagent_limit_hit");
 telemetry_event!(SubagentRateLimitWaited, "subagent_rate_limit_waited");
 telemetry_event!(
+    SubagentModelPresentationApplied,
+    "subagent_model_presentation_applied"
+);
+telemetry_event!(
+    SubagentModelOverrideRejected,
+    "subagent_model_override_rejected"
+);
+telemetry_event!(
     ActiveAgentMessageCompleted,
     "active_agent_message_completed"
 );
@@ -238,6 +246,9 @@ telemetry_event!(
 );
 telemetry_event!(McpInitCompleted, "mcp_init_completed");
 telemetry_event!(McpToolCalled, "mcp_tool_called");
+telemetry_event!(McpFileInputUsed, "mcp_file_input_used");
+telemetry_event!(McpFileInputCompleted, "mcp_file_input_completed");
+telemetry_event!(McpFileInputLimitHit, "mcp_file_input_limit_hit");
 telemetry_event!(
     SessionHarness,
     "session_harness",

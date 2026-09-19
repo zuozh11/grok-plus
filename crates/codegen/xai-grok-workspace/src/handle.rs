@@ -2567,7 +2567,14 @@ impl WorkspaceHandle {
             .active()
             .map(|active| active.servers.keys().cloned().collect())
             .unwrap_or_default();
-        crate::mcp::stop_servers(&session, &sid, &tool_server, &live).await;
+        crate::mcp::stop_servers(
+            &session,
+            &sid,
+            Some(&tool_server),
+            &live,
+            crate::mcp::Restart::OnReconfigured,
+        )
+        .await;
         {
             let _binding = session.mcp_binding.lock().await;
             let mut state = session.mcp_state.lock().await;
@@ -2644,6 +2651,89 @@ impl WorkspaceHandle {
             }
         }
         Ok(applied)
+    }
+    /// Stop `server_name` in every live session without unpublishing it; returns those sessions. See the daemon's `computer_use.rs`.
+    /// Without a hub the clients still end; only the tool unregisters are skipped.
+    pub async fn stop_mcp_server(&self, server_name: &str) -> Vec<String> {
+        use futures::StreamExt;
+        if self.shared.bind_mcp.is_none() {
+            tracing::debug!(
+                server_name,
+                "ignoring MCP server stop: this workspace has no local MCP configuration"
+            );
+            return Vec::new();
+        }
+        let tool_server = self.shared.hub_server_blocking().await;
+        if tool_server.is_none() {
+            tracing::info!(
+                server_name,
+                "no hub connection; stopping the MCP server without unadvertising its tools"
+            );
+        }
+        let mut walks: futures::stream::FuturesUnordered<_> = self
+            .session_ids()
+            .into_iter()
+            .map(|session_id| {
+                let tool_server = tool_server.as_ref();
+                async move {
+                    let stopped = self
+                        .stop_session_mcp_server(&session_id, server_name, tool_server)
+                        .await;
+                    (session_id, stopped)
+                }
+            })
+            .collect();
+        let mut stopped = Vec::new();
+        while let Some((session_id, was_running)) = walks.next().await {
+            if was_running {
+                stopped.push(session_id);
+            }
+        }
+        stopped
+    }
+    /// One session's half of [`Self::stop_mcp_server`]. Takes only the binding lock, not the
+    /// session's `update_lock`: a bind or reload converging this session may hold that for the
+    /// whole discovery window, and the release must not wait behind it. The publish is untouched
+    /// and a reload leaves the server stopped; the session's next bind starts it again. `true`
+    /// when the server was running here.
+    pub(crate) async fn stop_session_mcp_server(
+        &self,
+        session_id: &str,
+        server_name: &str,
+        tool_server: Option<&impl crate::mcp::HubToolRegistry>,
+    ) -> bool {
+        let Some(session) = self.session(session_id) else {
+            return false;
+        };
+        let Ok(sid) = SessionId::new(session_id) else {
+            return false;
+        };
+        let stopped = crate::mcp::stop_servers(
+            &session,
+            &sid,
+            tool_server,
+            std::slice::from_ref(&server_name.to_owned()),
+            crate::mcp::Restart::OnNextBind,
+        )
+        .await;
+        if stopped.is_empty() {
+            return false;
+        }
+        tracing::info!(
+            session_id,
+            server_name,
+            "stopped an MCP server in a session until its next bind"
+        );
+        if let Err(error) =
+            self.shared
+                .events
+                .send(xai_grok_workspace_types::WorkspaceEvent::ToolsChanged {
+                    session_id: session_id.to_owned(),
+                })
+        {
+            tracing::debug!(session_id, %error, "no listener for the tools-changed event");
+        }
+        true
     }
     /// Converge one session's MCP servers onto the *currently published* configuration, under that session's `update_lock`.
     /// The single entry point for every convergence — bind-spawned, reload-driven — so tool publication has exactly one channel (dynamic registration) and one serialization point per session.

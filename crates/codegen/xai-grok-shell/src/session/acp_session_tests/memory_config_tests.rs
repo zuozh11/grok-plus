@@ -142,8 +142,7 @@ pub(super) async fn create_test_actor_with_memory(
             |mc| mc.initial_injection.clone(),
         );
     SessionActor {
-        repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
-        ),
+        vcs_root: None,
         transient_retry_enabled: true,
         transient_retries_prompt_total: std::cell::Cell::new(0),
         transient_episode_start: std::cell::Cell::new(None),
@@ -369,7 +368,6 @@ pub(super) async fn create_test_actor_with_memory(
         turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
-        vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,

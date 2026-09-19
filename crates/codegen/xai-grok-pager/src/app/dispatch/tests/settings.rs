@@ -1554,6 +1554,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let away = !crate::appearance::cache::load_page_flip_on_send();
             let _ = dispatch(Action::SetPageFlipOnSend(away), app);
         }
+        "dashboard_preview" => {
+            let away = !app.current_ui.dashboard_preview_enabled();
+            let _ = dispatch(Action::SetDashboardPreview(away), app);
+        }
         "confirm_before_rewind" => {
             let away = !app.current_ui.confirm_before_rewind_enabled();
             let _ = dispatch(Action::SetConfirmBeforeRewind(away), app);

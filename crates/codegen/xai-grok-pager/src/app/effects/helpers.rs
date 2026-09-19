@@ -974,6 +974,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "dashboard_preview" => {
+            let SettingValue::Bool(enabled) = value else {
+                return Err(kind_mismatch("dashboard_preview", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_dashboard_preview(enabled)
+                .await
+                .map_err(|error| error.to_string())
+        }
         "page_flip_on_send" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("page_flip_on_send", "Bool", &value));

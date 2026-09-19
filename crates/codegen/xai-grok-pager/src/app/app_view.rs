@@ -805,6 +805,13 @@ pub struct AppView {
     pub welcome_on_workspace_mode: bool,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
+    /// Nesting depth of `dispatch::dispatch`; image notices surface only when it returns to 0.
+    pub dispatch_depth: u32,
+    /// Image notices raised while one dispatch or ACP message runs (unbound placeholder, unreadable
+    /// attachment, dropped by a command). App-owned so a command that removes its own session
+    /// (`/new`, `/home` in minimal) cannot take the notice down with it; the `unified_log` event is
+    /// written against the originating session when the notice is raised.
+    pub pending_image_notices: Vec<String>,
     /// Sticky hover flag for the privacy banner buttons (redraw on enter/leave).
     pub welcome_on_privacy_banner: bool,
     /// Sticky hover flag for the welcome upgrade CTA (redraw on enter/leave).
@@ -1452,6 +1459,8 @@ impl AppView {
             #[cfg(feature = "local-workspace")]
             welcome_on_workspace_mode: false,
             welcome_toast: None,
+            dispatch_depth: 0,
+            pending_image_notices: Vec::new(),
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
             welcome_changelog_cta_rect: None,
@@ -1928,6 +1937,11 @@ impl AppView {
         self.active_agent()
             .and_then(|a| a.session.session_id.as_ref())
             .map(|sid| sid.0.as_ref())
+    }
+    /// Show the queued image notices when no dispatch is in flight (a nested dispatch leaves them to
+    /// the outermost one); true when a visible surface changed.
+    pub fn flush_image_notices_if_root(&mut self) -> bool {
+        self.dispatch_depth == 0 && crate::app::dispatch::flush_image_notices(self)
     }
     /// Show a toast on the currently active view.
     /// Registration (and thus the mismatch notif) finishes during reconnect.
@@ -4302,7 +4316,7 @@ impl AppView {
     /// Render the current view to the terminal.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
         self.draw_inner(terminal);
-        xai_grok_telemetry::startup::record_first_frame();
+        xai_grok_telemetry::startup::record_first_draw();
         crate::memory_release::run_deferred_release();
     }
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {

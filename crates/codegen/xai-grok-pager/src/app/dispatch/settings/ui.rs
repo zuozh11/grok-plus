@@ -636,6 +636,9 @@ pub(in crate::app::dispatch) fn action_for_reset(
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
         ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
+        ("dashboard_preview", SettingValue::Bool(enabled)) => {
+            Some(Action::SetDashboardPreview(*enabled))
+        }
         ("confirm_before_rewind", SettingValue::Bool(b)) => {
             Some(Action::SetConfirmBeforeRewind(*b))
         }
@@ -809,6 +812,9 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
         ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
+        ("dashboard_preview", SettingValue::Bool(enabled)) => {
+            app.current_ui.dashboard_preview = Some(*enabled);
+        }
         ("confirm_before_rewind", SettingValue::Bool(b)) => {
             set_confirm_before_rewind_inner(app, *b)
         }

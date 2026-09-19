@@ -5036,6 +5036,81 @@ fn tier_restricted_media_shows_upsell_text_not_error() {
         block.output
     );
 }
+/// The daemon client hand-builds the media card's JSON (it cannot depend on `MediaGenOutput`); this pins that the
+/// exact shape it sends — `type` + `path` only — renders as a media ref for both spellings, and that the fuller
+/// shape the built-in tools send does too.
+#[test]
+fn daemon_generate_image_output_shape_renders_as_a_media_ref() {
+    let outputs = [
+        (
+            "ImageGen",
+            serde_json::json!({ "type": "ImageGen", "path": "/work/proj/assets/cat.png" }),
+        ),
+        (
+            "ImageEdit",
+            serde_json::json!({ "type": "ImageEdit", "path": "/work/proj/assets/cat.png" }),
+        ),
+        (
+            "ImageGen",
+            serde_json::json!({
+                "type": "ImageGen",
+                "path": "/work/proj/assets/cat.png",
+                "filename": "cat.png",
+                "session_folder": "assets",
+            }),
+        ),
+    ];
+    for (variant, output) in outputs {
+        let tc = acp::ToolCall::new(
+            acp::ToolCallId::new(Arc::from("daemon-image")),
+            "Generate image: \"a cat\"",
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Completed)
+        .raw_input(Some(serde_json::json!({
+            "variant": variant, "prompt": "a cat", "aspect_ratio": "16:9",
+        })))
+        .raw_output(Some(output.clone()))
+        .locations(vec![]);
+        assert_eq!(
+            media_gen_ref(&tc),
+            Some((std::path::PathBuf::from("/work/proj/assets/cat.png"), false)),
+            "{output}"
+        );
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+            tool_call_to_block(&tc, None, &SubagentLabelRegistry::default())
+        else {
+            panic!("expected an Other tool-call block for {output}");
+        };
+        assert!(block.is_success(), "{output}");
+    }
+}
+/// A refused generation (the server's access error) fails the card with the reason, and draws no image.
+#[test]
+fn daemon_generate_image_refusal_is_a_failed_card_with_the_reason() {
+    let reason = "Developer, Sand, or training access required";
+    let tc = acp::ToolCall::new(
+        acp::ToolCallId::new(Arc::from("daemon-image")),
+        "Generate image: \"a cat\"",
+    )
+    .kind(acp::ToolKind::Other)
+    .status(acp::ToolCallStatus::Failed)
+    .raw_input(Some(serde_json::json!({
+        "variant": "ImageGen", "prompt": "a cat", "aspect_ratio": "auto",
+    })))
+    .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+        acp::TextContent::new(reason.to_string()),
+    ))])
+    .locations(vec![]);
+    assert_eq!(media_gen_ref(&tc), None);
+    let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+        tool_call_to_block(&tc, None, &SubagentLabelRegistry::default())
+    else {
+        panic!("expected an Other tool-call block");
+    };
+    assert!(!block.is_success());
+    assert_eq!(block.error.as_deref(), Some(reason));
+}
 /// A hook batch younger than the reveal delay is invisible; once it outlives the delay it outranks the phase it blocks.
 #[test]
 fn hooks_running_reveals_only_after_delay_and_outranks_thinking() {

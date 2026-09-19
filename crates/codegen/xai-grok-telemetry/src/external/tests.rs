@@ -511,7 +511,6 @@ fn prompt_latency(ttft_ms: Option<u64>, ttfm_ms: Option<u64>) -> events::PromptL
         total_ms: 0,
         mcp_wait_ms: 0,
         tool_collection_ms: 0,
-        repo_status_wait_ms: None,
         model_call_ms: 0,
         pre_model_ms: 0,
         mcp_server_count: 0,

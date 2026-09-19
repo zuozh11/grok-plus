@@ -576,10 +576,15 @@ impl AgentView {
                                 return InputOutcome::Changed;
                             }
                             // Drain images BEFORE set_text("") wipes the chip elements.
+                            let image_notice = self.unbound_image_placeholder_notice();
                             let images = self.prompt.drain_images();
                             self.prompt.set_text("");
                             self.note_draft_consumed();
-                            return InputOutcome::Action(Action::SendPromptNow { text, images });
+                            return InputOutcome::Action(Action::SendPromptNow {
+                                text,
+                                images,
+                                image_notice,
+                            });
                         }
                     } else if let Some(outcome) = self.try_send_now_queued_from_prompt() {
                         return outcome;
@@ -855,10 +860,10 @@ impl AgentView {
     fn populate_prompt_from_history(&mut self, text: &str) {
         if let Some(cmd) = text.strip_prefix("! ") {
             self.prompt_input_mode = PromptInputMode::Bash;
-            self.prompt.set_text(cmd);
+            self.prompt.set_text_discarding_images(cmd);
         } else {
             self.prompt_input_mode = PromptInputMode::Normal;
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         }
         let len = self.prompt.textarea.text().len();
         self.prompt.textarea.set_cursor(len);
@@ -887,12 +892,12 @@ impl AgentView {
             && let Some(cmd) = text.strip_prefix("! ")
         {
             self.prompt_input_mode = PromptInputMode::Bash;
-            self.prompt.set_text(cmd);
+            self.prompt.set_text_discarding_images(cmd);
         } else if self.prompt_input_mode == PromptInputMode::Bash {
             self.prompt_input_mode = PromptInputMode::Normal;
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         } else {
-            self.prompt.set_text(text);
+            self.prompt.set_text_discarding_images(text);
         }
 
         let len = self.prompt.textarea.text().len();

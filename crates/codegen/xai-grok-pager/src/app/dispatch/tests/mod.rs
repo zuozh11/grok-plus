@@ -245,6 +245,8 @@ fn test_app() -> AppView {
         #[cfg(feature = "local-workspace")]
         welcome_on_workspace_mode: false,
         welcome_toast: None,
+        dispatch_depth: 0,
+        pending_image_notices: Vec::new(),
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
         auth_show_raw_url: false,

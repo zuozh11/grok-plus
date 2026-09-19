@@ -601,8 +601,6 @@ pub struct FeedbackContext {
 pub struct StartupHints {
     #[serde(default)]
     pub non_interactive: bool,
-    #[serde(default)]
-    pub skip_git_status: bool,
     /// Leading conversation items to preserve verbatim across compaction (the immutable head).
     /// A fresh subagent's head is its spawn-injected items; a `resume_from` subagent's is just the System head so the resumed body stays compactable.
     #[serde(default)]

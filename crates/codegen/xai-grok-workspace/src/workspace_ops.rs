@@ -2384,7 +2384,7 @@ mod tests {
             "HookSpecWire serde shape drifted from upstream HookSpec"
         );
     }
-    /// The worktree-fork request projects onto / rebuilds from its wire mirror; the two `#[serde(skip)]` runtime fields are never serialized.
+    /// The worktree-fork request projects onto / rebuilds from its wire mirror; `#[serde(skip)]` runtime fields are never serialized.
     #[test]
     fn create_worktree_from_worktree_request_wire_round_trip() {
         let req = crate::worktree::CreateWorktreeFromWorktreeRequest {
@@ -2398,6 +2398,7 @@ mod tests {
             grove_gate_source: None,
             cancellation_token: None,
             resolved_dest_path: None,
+            resolved_source_git_root: None,
         };
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
@@ -2407,6 +2408,7 @@ mod tests {
         assert_eq!(back.source_worktree_path, "/src");
         assert!(back.cancellation_token.is_none());
         assert!(back.resolved_dest_path.is_none());
+        assert!(back.resolved_source_git_root.is_none());
     }
     use crate::handle::tests::make_handle;
     #[tokio::test]

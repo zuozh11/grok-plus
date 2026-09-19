@@ -1420,7 +1420,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
                 page_flip_entry: None,
             }
         } else {
-            maybe_drain_queue(agent)
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
         };
         effects.append(&mut drain.effects);
         agent.session.prompt_history_loading = true;
@@ -1559,7 +1559,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
                 page_flip_entry: None,
             }
         } else {
-            maybe_drain_queue(agent)
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
         };
         effects.append(&mut drain.effects);
         agent.session.prompt_history_loading = true;
@@ -1621,13 +1621,17 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     abandoned_husk_cleanup_effects(app, session_id)
 }
 /// Record a session-creation failure as a startup warning; the welcome screen has no toast.
+/// Inserted first: the banner shows one warning, and a failed create outranks a probe warning already there.
 fn push_session_create_failure_warning(app: &mut AppView, msg: &str) {
     if !app.startup_warnings.iter().any(|w| w.message == msg) {
-        app.startup_warnings.push(crate::startup::StartupWarning {
-            severity: crate::startup::WarningSeverity::Warning,
-            message: msg.to_string(),
-            action: None,
-        });
+        app.startup_warnings.insert(
+            0,
+            crate::startup::StartupWarning {
+                severity: crate::startup::WarningSeverity::Warning,
+                message: msg.to_string(),
+                action: None,
+            },
+        );
     }
 }
 /// After an orphan create fails, New/Fork may already have attached the dashboard overlay to the removed placeholder.
@@ -1928,7 +1932,7 @@ pub(in crate::app::dispatch) fn handle_switch_model_complete(
                 vec![]
             }
         };
-        let drain = maybe_drain_queue(agent);
+        let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
         effects.extend(drain.effects);
         note_peek_page_flip(app, agent_id, drain.page_flip_entry);
         effects

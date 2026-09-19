@@ -1765,8 +1765,12 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::SnapshotToolDefinitions { respond_to } => {
                             let defs = session.prepare_tool_definitions_inner().await;
-                            let specs = session.turn_base_tool_specs(&defs);
-                            let _ = respond_to.send(specs);
+                            let task_model_selection =
+                                session.rebuild_spec.task_model_selection.get();
+                            let _ = respond_to.send(crate::session::commands::ForkedToolSnapshot {
+                                specs: session.turn_base_tool_specs(&defs),
+                                task_model_selection,
+                            });
                         }
                         SessionCommand::SetClientHooks { hooks } => {
                             *session.client_hooks.borrow_mut() = hooks;

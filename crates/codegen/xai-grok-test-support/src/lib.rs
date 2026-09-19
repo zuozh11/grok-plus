@@ -105,7 +105,10 @@ pub use acp_transcript::TranscriptEntry;
 pub use conversation::ReadConversation;
 pub use conversation_script::{Conversation, MockToolCall, ScriptViolation, mock_call_id};
 pub use counting_server::spawn_counting_server;
-pub use env::{EnvGuard, git_workdir, grok_binary, isolate_grok_env};
+pub use env::{
+    EnvGuard, ensure_cargo_bin_with_features, git_workdir, grok_binary, isolate_grok_env,
+    set_grok_binary_override,
+};
 pub use failure::{
     CUT_REPLY, DOOM_LOOP_CHECK_HEADER, DOOM_LOOP_TRIGGER, ErrorPosition, LOOPING_REPLY,
     ObservedFailure, StatusFailure, StreamError,
@@ -122,8 +125,8 @@ pub use inference_request::{DEFAULT_MODEL, InferenceEndpoint};
 pub use leader::LeaderFixture;
 pub use mock_otel_server::MockOtelServer;
 pub use mock_server::{
-    FeedbackPost, GatedUploadProxy, MockInferenceServer, MockModelEntry, ScriptedResponse,
-    SseEvent, StorageUpload,
+    FeedbackPost, GatedUploadProxy, MockCanAdministerTeam, MockInferenceServer, MockModelEntry,
+    MockUserTeam, ScriptedResponse, SseEvent, StorageUpload,
 };
 pub use otel_event::{
     OtelAttributes, OtelBody, OtelDecodeError, OtelEvent, OtelExport, OtelFault, OtelLogRecord,
@@ -138,4 +141,4 @@ pub use process::{
 };
 pub use resources::{ResourceGrowth, ResourceSnapshot, RssMeasurement, RssOutcome, RssSampler};
 pub use sandbox::{TestSandbox, TestSandboxBuilder};
-pub use tools::Tool;
+pub use tools::{DAEMON_SPAWN_TOOL, GROK_BUILD_SPAWN_TOOL, Tool};

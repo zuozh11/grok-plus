@@ -3337,11 +3337,6 @@ impl SessionActor {
                     .get_prompt_index()
                     .await
                     .saturating_sub(1) as u32;
-                if turn_index == 0
-                    && let Some(repo_status_wait_ms) = self.repo_status_prefetch.take_wait_ms()
-                {
-                    pt.record_repo_status_wait(repo_status_wait_ms);
-                }
                 turn_phases.arm_latency(pt.build(
                     model_duration_ms,
                     turn_index,
