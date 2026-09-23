@@ -205,6 +205,7 @@ impl AgentView {
     fn restore_stash_entry(&mut self, entry: PromptStashEntry) {
         self.prompt_input_mode = entry.input_mode;
         self.prompt.restore(entry.prompt);
+        self.prompt.set_cursor(self.prompt.text().len());
         self.prompt.refresh_slash(&self.session.models);
     }
 }
@@ -282,7 +283,11 @@ mod tests {
             );
             assert_eq!(agent.prompt.text(), "half-typed thought");
             assert!(agent.prompt_stash.is_none());
-            assert_eq!(agent.prompt.cursor(), 4, "cursor returns to where it was");
+            assert_eq!(
+                agent.prompt.cursor(),
+                agent.prompt.text().len(),
+                "cursor is at the end of the restored draft"
+            );
         }
     }
 

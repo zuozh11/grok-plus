@@ -41,8 +41,10 @@ mod ext_protocol;
 mod mcp_init;
 mod prompt_ack;
 mod reducer;
+mod signals;
 use ext_protocol::{ExtEvent, handle_ext_notification, reply_headless_ext_method};
 use prompt_ack::{abort_unacknowledged_prompt, headless_ack_signal};
+use signals::HeadlessSignals;
 mod cli;
 pub use cli::{HeadlessPrompt, OutputFormat, parse_json_schema, parse_permission_rules_lenient};
 pub(crate) use cli::{ResolvedAgent, resolve_agent_arg};
@@ -804,6 +806,7 @@ pub async fn run_single_turn(
     verbatim: bool,
     options: HeadlessOptions,
 ) -> Result<()> {
+    let signals = HeadlessSignals::install().await?;
     xai_grok_shell::http::set_process_client_mode_headless();
     let cwd = match options.cwd {
         None => std::env::current_dir()?,
@@ -895,7 +898,7 @@ pub async fn run_single_turn(
             anyhow::bail!("{msg}");
         }
     };
-    let _agent_guard = AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
+    let agent_guard = AgentShutdownGuard::new(cancel.clone(), Some(spawned.thread_handle));
     let (acp_tx, mut acp_rx) = (spawned.channel.tx, spawned.channel.rx);
     crate::unified_log::init(acp_tx.clone());
     crate::unified_log::info(
@@ -1195,7 +1198,9 @@ pub async fn run_single_turn(
     let mut prompt_done_at: Option<Instant> = None;
     let mut connection_closed = false;
     let mut prompt_unacknowledged = false;
+    let mut terminated_by_signal = None;
     if let Some(mut prompt_fut) = prompt_fut {
+        let deferred_exit = signals.defer_exit();
         loop {
             if emitter.write_error.is_some() {
                 tracing::warn!("headless: stdout write failed; stopping the stream loop");
@@ -1249,6 +1254,8 @@ pub async fn run_single_turn(
             };
             tokio::select! {
                 biased;
+                // First in the biased order so an ACP firehose cannot starve the signal
+                () = deferred_exit.signalled() => break,
                 msg = acp_rx.recv() => {
                     let Some(msg) = msg else {
                         emitter.on_error("Connection closed unexpectedly", None);
@@ -1324,6 +1331,7 @@ pub async fn run_single_turn(
                 }
             }
         }
+        terminated_by_signal = deferred_exit.release();
         drain_pending_acp_messages(
             &mut acp_rx,
             &mut emitter,
@@ -1341,23 +1349,22 @@ pub async fn run_single_turn(
             reap_pending_background_tasks(&pending_bg, &session_id, &acp_tx).await;
         }
     }
-    if prompt_unacknowledged {
-        if tokio::time::timeout(
-            prompt_ack::HEADLESS_ABORT_SEND_TIMEOUT,
-            crate::unified_log::flush_blocking(),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!(
-                "headless: unified log flush timed out behind the unacknowledged prompt"
-            );
-        }
-    } else {
-        crate::unified_log::flush_blocking().await;
-    }
+    flush_unified_log_at_exit(
+        crate::unified_log::flush_blocking(),
+        prompt_unacknowledged,
+        terminated_by_signal,
+    )
+    .await;
     if track_active {
         let _ = xai_grok_active_sessions::try_unregister(&session_id);
+    }
+    if let Some(code) = terminated_by_signal {
+        tracing::info!(
+            exit_code = code,
+            "headless: a signal during the turn ends the run"
+        );
+        drop(agent_guard);
+        crate::app::signal_handler::force_exit(code);
     }
     let outcome: Result<()> = match prompt_result {
         _ if connection_closed => Err(anyhow::anyhow!("Connection closed unexpectedly")),
@@ -1540,6 +1547,24 @@ fn reap_request_for_work(
         ),
     };
     Ok(acp::ExtRequest::new(method, params.into()))
+}
+/// The flush waits on the shell's reply, which may never come when the shell never took the prompt,
+/// or when a signal ends the run and a closed terminal leaves nobody to send the second one.
+async fn flush_unified_log_at_exit(
+    flush: impl Future<Output = ()>,
+    prompt_unacknowledged: bool,
+    terminated_by_signal: Option<i32>,
+) {
+    if !prompt_unacknowledged && terminated_by_signal.is_none() {
+        flush.await;
+        return;
+    }
+    if tokio::time::timeout(prompt_ack::HEADLESS_ABORT_SEND_TIMEOUT, flush)
+        .await
+        .is_err()
+    {
+        tracing::warn!("headless: unified log flush timed out at exit");
+    }
 }
 /// Best-effort kill of background work still pending at exit so it never outlives the process.
 async fn reap_pending_background_tasks(

@@ -30,6 +30,9 @@ pub(crate) mod prompt_ack;
 pub(crate) fn is_daemon_session_row(_source: &str) -> bool {
     false
 }
+pub(crate) fn is_daemon_or_remote_control_row(_source: &str) -> bool {
+    false
+}
 pub use xai_prompt_queue as prompt_queue;
 mod acp_handler;
 mod connect_timeout;
