@@ -28,6 +28,8 @@ use std::sync::Once;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use xai_grok_permission_rules::trust::canonicalize_or_owned;
+pub use xai_grok_permission_rules::trust::is_home_dir;
 
 /// Filename of the folder-trust store under `~/.grok/`.
 pub const TRUST_FILE_NAME: &str = xai_grok_config::TRUSTED_FOLDERS_FILENAME;
@@ -426,14 +428,6 @@ fn git_derived_workspace_key(cwd: &Path) -> PathBuf {
     canonicalize_or_owned(cwd)
 }
 
-/// Whether `path` resolves to the user's home directory.
-pub fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = xai_dirs::home_dir() else {
-        return false;
-    };
-    canonicalize_or_owned(path) == canonicalize_or_owned(&home)
-}
-
 /// Whether `key` is too broad to ever be a safe trust root: refused on write and ignored on read (fail closed). Also consumed by [`crate::folder_trust`] as the "key can never be recorded" signal.
 /// Such a key can't be durably gated, so it resolves Trusted instead of prompting on a decision that could never persist.
 pub fn is_unsafe_trust_root(key: &Path) -> bool {
@@ -448,10 +442,6 @@ fn workspace_id(path: &Path) -> PathBuf {
 /// Fresh `$GROK_HOME` or `<home>/.grok`. Does not call `grok_home()` and does not create directories.
 pub(crate) fn trust_store_home() -> Option<PathBuf> {
     xai_dirs::resolve_grok_home()
-}
-
-fn canonicalize_or_owned(path: &Path) -> PathBuf {
-    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn now_unix() -> Option<i64> {

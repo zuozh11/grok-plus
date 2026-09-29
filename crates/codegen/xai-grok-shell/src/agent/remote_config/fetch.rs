@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 
-use super::{ModelFetchAuth, ModelsCacheManager, ModelsCacheScope};
+use super::{ModelFetchAuth, ModelsCacheManager, ModelsCacheScope, resolve_models_cache_scope};
 use crate::agent::config::{self, ModelEntry};
 use crate::remote::{FetchModelsResult, ModelSource, active_model_source};
 use xai_grok_login::GrokAuth;
@@ -38,7 +38,7 @@ pub(crate) fn prefetch_models_blocking(
         endpoints,
         auth,
         fetch_auth,
-        crate::util::config::resolve_remote_fetch_enabled(),
+        crate::agent::remote_config::models_fetch_enabled(endpoints, auth),
     )
 }
 
@@ -101,7 +101,7 @@ pub(in crate::agent::remote_config) fn fetch_models_uncommitted(
     remote_fetch_enabled: bool,
 ) -> ModelsPrefetch {
     let source = active_model_source(endpoints, fetch_auth);
-    let scope = ModelsCacheScope::resolve(endpoints, fetch_auth, auth);
+    let scope = resolve_models_cache_scope(endpoints, fetch_auth, auth);
 
     let cache = ModelsCacheManager::new();
     if let Some(cached) = cache.load_fresh(&scope) {

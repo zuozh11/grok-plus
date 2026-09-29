@@ -1,0 +1,30 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-permission-rules"
+version = "0.1.0"
+edition.workspace = true
+description = "Grok's permission rule engine, apart from the session and tool code that uses it"
+
+[dependencies]
+agent-client-protocol = { workspace = true }
+dunce = { workspace = true }
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+glob = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+toml = { workspace = true, features = ["preserve_order"] }
+tracing = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-bash = "0.25"
+url = { workspace = true }
+xai-dirs = { workspace = true }
+xai-grok-config = { workspace = true }
+xai-grok-paths = { path = "../xai-grok-paths" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

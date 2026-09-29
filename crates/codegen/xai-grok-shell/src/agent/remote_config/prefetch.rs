@@ -4,7 +4,8 @@ use indexmap::IndexMap;
 
 use super::{
     Commit, ModelFetchAuth, ModelsCacheScope, ModelsPrefetch, evaluate_models_commit,
-    fetch_models_uncommitted, resolve_disk_auth,
+    fetch_models_uncommitted, models_fetch_enabled, resolve_disk_auth,
+    resolve_live_models_cache_scope, resolve_models_cache_scope,
 };
 use crate::agent::config::{self, ModelEntry};
 use xai_grok_login::{GrokAuth, GrokComConfig};
@@ -19,7 +20,7 @@ pub(crate) struct PrefetchInputs {
 pub(in crate::agent::remote_config) fn resolve_startup_endpoints() -> config::EndpointsConfig {
     let mut endpoints = config::EndpointsConfig::from_effective_config();
     if endpoints.deployment_key.is_none() {
-        endpoints.deployment_key = crate::managed_config::resolve_deployment_key();
+        endpoints.deployment_key = xai_grok_cloud_config::managed_config::resolve_deployment_key();
     }
     endpoints
 }
@@ -95,16 +96,16 @@ fn models_prefetch_inputs(
     grok_com_config: Option<GrokComConfig>,
     warmed_auth: Option<GrokAuth>,
 ) -> Option<ModelsPrefetchPlan> {
-    if crate::managed_config::policy_repair_pending() {
+    if xai_grok_cloud_config::managed_config::policy_repair_pending() {
         return None;
     }
-    let remote = crate::util::config::resolve_remote_fetch_enabled();
     // Prefer the live in-memory session so a just-refreshed or just-logged-in
     // credential drives the catalog fetch, not a stale or absent disk token.
     let auth = warmed_auth.or_else(|| resolve_disk_auth(grok_com_config.clone()));
     let endpoints = resolve_startup_endpoints();
+    let remote = models_fetch_enabled(&endpoints, auth.as_ref());
     let env = resolve_prefetch_inputs_from_parts(auth.clone(), endpoints, remote)?;
-    let expected = ModelsCacheScope::resolve(&env.endpoints, env.model_fetch_auth, auth.as_ref());
+    let expected = resolve_models_cache_scope(&env.endpoints, env.model_fetch_auth, auth.as_ref());
     Some(ModelsPrefetchPlan {
         env,
         expected,
@@ -143,8 +144,10 @@ fn run_models_prefetch(
             // Re-resolve the live scope under the fetch-time mode (stable origin) but with live disk
             // auth for identity, so an alpha flip, key rotation, or account switch is caught without
             // abandoning the catalog when disk auth is briefly absent.
-            let live = ModelsCacheScope::resolve_live(env.model_fetch_auth, commit_config.as_ref());
-            match evaluate_models_commit(&expected, &live) {
+            let live =
+                resolve_live_models_cache_scope(env.model_fetch_auth, commit_config.as_ref());
+            let fetch_enabled = models_fetch_enabled(&env.endpoints, env.auth.as_ref());
+            match evaluate_models_commit(&expected, &live, fetch_enabled) {
                 Commit::CacheAndServe => Some(write.commit()),
                 Commit::ServeInMemory => {
                     tracing::info!(

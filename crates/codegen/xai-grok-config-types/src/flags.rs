@@ -1,42 +1,8 @@
 //! Config-value resolution leaf types and per-model laziness config, extracted from xai-grok-shell so crates the shell depends on can use them.
 
 use xai_grok_config::env_bool;
+pub use xai_grok_config::{ConfigSource, Resolved};
 
-/// Where a resolved config value came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum ConfigSource {
-    Requirement,
-    Cli,
-    Env,
-    SystemManagedConfig,
-    ManagedConfig,
-    UserConfig,
-    /// A value injected via the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay.
-    EnvOverlay,
-    Config,
-    Remote,
-    Default,
-}
-
-/// A resolved config value with its source for diagnostics.
-#[derive(Debug, Clone)]
-pub struct Resolved<T> {
-    pub value: T,
-    pub source: ConfigSource,
-}
-
-impl<T> Resolved<T> {
-    pub fn new(value: T, source: ConfigSource) -> Self {
-        Self { value, source }
-    }
-}
-
-impl<T: std::fmt::Display> std::fmt::Display for Resolved<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.value, self.source)
-    }
-}
 /// Resolve a boolean feature flag; the highest set tier wins: requirement, cli, env, config, managed, feature flag, default.
 pub struct BoolFlag {
     requirement: Option<bool>,

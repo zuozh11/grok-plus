@@ -479,8 +479,7 @@ pub(crate) fn is_claude_import_marked() -> bool {
     if let Some(v) = *MARKER_CACHE.read().expect("MARKER_CACHE poisoned") {
         return v;
     }
-    let config_path = crate::util::grok_home::grok_home().join("config.toml");
-    let v = is_claude_import_marked_at(&config_path);
+    let v = xai_grok_config::is_claude_import_marked(&crate::util::grok_home::grok_home());
     *MARKER_CACHE.write().expect("MARKER_CACHE poisoned") = Some(v);
     v
 }
@@ -499,7 +498,7 @@ pub(crate) fn reset_marker_cache_for_test() {
 
 /// Like [`is_claude_import_marked`], but logs a one-time `info!` line on the first true result per process.
 /// `gate_name` identifies which call site fired the cutoff (useful for debugging which subsystem stopped reading `.claude/`).
-/// Call sites are runtime fallback paths in `claude_compat.rs`, `util/config.rs`, `util/hooks.rs`, and `agent/config.rs` that previously read `.claude/`.
+/// Call sites are the MCP loaders in `util/config/mcp.rs` and [`import_marker`] for hook and plugin discovery.
 pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool {
     static LOGGED: OnceLock<()> = OnceLock::new();
     let marked = is_claude_import_marked();
@@ -514,21 +513,11 @@ pub(crate) fn is_claude_import_marked_with_log(gate_name: &'static str) -> bool 
     marked
 }
 
-/// Testable variant of [`is_claude_import_marked`] that reads from the given path.
-pub(crate) fn is_claude_import_marked_at(config_path: &Path) -> bool {
-    let content = match std::fs::read_to_string(config_path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let value: TomlValue = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    value
-        .get("claude_compat")
-        .and_then(|v| v.get("imported"))
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
+/// Whether hook and plugin discovery skip Claude sources because the user imported them.
+pub(crate) fn import_marker() -> xai_grok_hooks::discovery::ClaudeImport {
+    xai_grok_hooks::discovery::ClaudeImport::from_marker(is_claude_import_marked_with_log(
+        "hook_and_plugin_sources",
+    ))
 }
 
 /// Write `[claude_compat] imported = true` to `~/.grok/config.toml`.
@@ -563,20 +552,7 @@ fn write_import_marker(config_path: &Path) -> anyhow::Result<()> {
     compat_table.insert("imported".to_string(), TomlValue::Boolean(true));
 
     let toml_str = toml::to_string_pretty(&root)?;
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = config_path.with_extension("toml.tmp");
-    // Best-effort cleanup of the .tmp file if either write or rename fails
-    // A stale .tmp would otherwise survive next to the real config, and the next attempt would inherit a half-written file before the rename clobbers it
-    if let Err(e) = std::fs::write(&tmp, &toml_str) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    if let Err(e) = std::fs::rename(&tmp, config_path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    crate::util::config::atomic_write_string(config_path, &toml_str)?;
     Ok(())
 }
 
@@ -599,7 +575,7 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
 
     if !plan.global_items.is_empty() {
         let global_path = crate::util::grok_home::grok_home().join("config.toml");
-        let count = apply_items_to_config(&global_path, &plan.global_items)?;
+        let count = apply_items_to_config(&global_path, &plan.global_items, ImportScope::Global)?;
         result.global_count = count;
         if count > 0 {
             result
@@ -624,7 +600,8 @@ pub fn apply_import(plan: &ImportPlan, cwd: &Path) -> anyhow::Result<ImportResul
     if !plan.project_items.is_empty() {
         let project_root = find_project_root(cwd);
         let project_path = project_root.join(".grok").join("config.toml");
-        let count = apply_items_to_config(&project_path, &plan.project_items)?;
+        let count =
+            apply_items_to_config(&project_path, &plan.project_items, ImportScope::Project)?;
         result.project_count = count;
         if count > 0 {
             result
@@ -669,7 +646,12 @@ impl ImportResult {
 }
 
 /// Apply items to a single config.toml file using atomic write.
-fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow::Result<usize> {
+/// A user config symlink is written through; a project `.grok/config.toml` symlink is replaced.
+fn apply_items_to_config(
+    config_path: &Path,
+    items: &[ImportableItem],
+    scope: ImportScope,
+) -> anyhow::Result<usize> {
     // Read existing TOML, reporting parse errors instead of silently discarding the file
     // An atomic rewrite would otherwise drop unrelated sections ([model], [ui], etc.) and overwrite a hand-edited config that happens to have a trailing comma
     let mut root: TomlValue = match std::fs::read_to_string(config_path) {
@@ -732,14 +714,15 @@ fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow
     }
 
     if count > 0 {
-        // Atomic write: write to .tmp, then rename.
         let toml_str = toml::to_string_pretty(&root)?;
-        let tmp = config_path.with_extension("toml.tmp");
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        match scope {
+            ImportScope::Global => {
+                crate::util::config::atomic_write_string(config_path, &toml_str)?
+            }
+            ImportScope::Project => {
+                crate::util::config::atomic_replace_string(config_path, &toml_str)?
+            }
         }
-        std::fs::write(&tmp, &toml_str)?;
-        std::fs::rename(&tmp, config_path)?;
         info!(
             path = %config_path.display(),
             count,
@@ -825,7 +808,6 @@ fn format_rule_string(rule: &PermissionRule) -> String {
         ToolFilter::WebFetch => "WebFetch",
         ToolFilter::WebSearch => "WebSearch",
         ToolFilter::AgentMessage => "AgentMessage",
-        _ => "",
     };
 
     match (&rule.pattern, &rule.tool) {
@@ -1082,6 +1064,22 @@ mod tests {
     use super::*;
     use xai_grok_workspace::HookSourceConfig;
 
+    fn source_paths(
+        dir: &Path,
+        compat: &xai_grok_tools::types::compat::CompatConfig,
+    ) -> xai_grok_hooks::discovery::HookSourcePaths {
+        xai_grok_hooks::discovery::discover_hook_source_paths(
+            xai_grok_hooks::discovery::DiscoveryOptions {
+                git_root: Some(dir),
+                grok_home: None,
+                home: Some(dir),
+                compat: compat.hooks(),
+                claude_import: crate::claude_import::import_marker(),
+                trust: xai_grok_hooks::trust::Trust::Trusted,
+            },
+        )
+    }
+
     fn source_path_strs(sources: &[HookSourceConfig]) -> Vec<String> {
         sources
             .iter()
@@ -1260,43 +1258,11 @@ mod tests {
     }
 
     #[test]
-    fn is_claude_import_marked_at_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does-not-exist.toml");
-        assert!(!is_claude_import_marked_at(&path));
-    }
-
-    #[test]
-    fn is_claude_import_marked_at_missing_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
-        std::fs::write(&path, "[other]\nkey = \"value\"\n").unwrap();
-        assert!(!is_claude_import_marked_at(&path));
-    }
-
-    #[test]
-    fn is_claude_import_marked_at_explicit_false() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[claude_compat]\nimported = false\n").unwrap();
-        assert!(!is_claude_import_marked_at(&path));
-    }
-
-    #[test]
-    fn is_claude_import_marked_at_true() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[claude_compat]\nimported = true\n").unwrap();
-        assert!(is_claude_import_marked_at(&path));
-    }
-
-    #[test]
     fn write_import_marker_creates_new_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sub").join("config.toml");
-        write_import_marker(&path).unwrap();
-        assert!(is_claude_import_marked_at(&path));
+        let grok_home = dir.path().join("sub");
+        write_import_marker(&grok_home.join("config.toml")).unwrap();
+        assert!(xai_grok_config::is_claude_import_marked(&grok_home));
     }
 
     #[test]
@@ -1342,7 +1308,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         write_import_marker(&path).unwrap();
         write_import_marker(&path).unwrap();
-        assert!(is_claude_import_marked_at(&path));
+        assert!(xai_grok_config::is_claude_import_marked(dir.path()));
     }
 
     // The MARKER_CACHE is a process-global RwLock so these tests must run serially
@@ -1542,11 +1508,7 @@ mod tests {
         refresh_marker_cache(true);
         let dir = tempfile::tempdir().unwrap();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         let project_strs = source_path_strs(&paths.project);
         assert!(
             !project_strs.iter().any(|s| s.contains(".claude")),
@@ -1584,11 +1546,7 @@ mod tests {
         refresh_marker_cache(false);
         let dir = tempfile::tempdir().unwrap();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         let project_strs = source_path_strs(&paths.project);
         assert!(
             project_strs.iter().any(|s| s.contains(".claude")),
@@ -1604,11 +1562,7 @@ mod tests {
         refresh_marker_cache(false);
         let dir = tempfile::tempdir().unwrap();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         let global_strs = source_path_strs(&paths.global);
         assert!(
             global_strs
@@ -1635,11 +1589,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut compat = xai_grok_tools::types::compat::CompatConfig::default();
         compat.cursor.hooks = false;
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         let global_strs = source_path_strs(&paths.global);
         assert!(
             !global_strs.iter().any(|s| s.contains(".cursor")),
@@ -1663,11 +1613,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut compat = xai_grok_tools::types::compat::CompatConfig::default();
         compat.claude.hooks = false;
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         let global_strs = source_path_strs(&paths.global);
         assert!(
             !global_strs.iter().any(|s| s.contains("/.claude/")),
@@ -1686,22 +1632,17 @@ mod tests {
     #[serial]
     fn as_sources_gates_project_sources_on_trust() {
         // Trust gating lives in `HookSourcePaths::as_sources`: project sources are dropped when untrusted and kept when trusted
-        // Assert on project sources (git_root-relative) since global sources use the real, non-injectable home
         let _g = MarkerGuard;
         refresh_marker_cache(false);
         let dir = tempfile::tempdir().unwrap();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let paths = xai_grok_hooks::discovery::discover_hook_source_paths(
-            Some(dir.path()),
-            &compat,
-            is_claude_import_marked(),
-        );
+        let paths = source_paths(dir.path(), &compat);
         assert!(
             !paths.project.is_empty(),
             "project source paths should be non-empty for a git_root"
         );
 
-        let (global_untrusted, project) = paths.as_sources(false);
+        let (global_untrusted, project) = paths.as_sources(xai_grok_hooks::trust::Trust::Untrusted);
         assert_eq!(
             global_untrusted.len(),
             paths.global.len(),
@@ -1709,13 +1650,13 @@ mod tests {
         );
         assert!(
             project.is_empty(),
-            "untrusted: as_sources(false) must drop all project sources"
+            "untrusted: as_sources must drop all project sources"
         );
 
-        let (_global, project) = paths.as_sources(true);
+        let (_global, project) = paths.as_sources(xai_grok_hooks::trust::Trust::Trusted);
         assert!(
             !project.is_empty(),
-            "trusted: as_sources(true) must keep project sources"
+            "trusted: as_sources must keep project sources"
         );
     }
 
@@ -1754,14 +1695,24 @@ mod tests {
         let mut compat = xai_grok_tools::types::compat::CompatConfig::default();
 
         compat.claude.hooks = false;
-        let (reg, _errs) = crate::util::hooks::discover_hooks(Some(git_root.path()), &compat, true);
+        let (reg, _errs) = crate::util::hooks::discover_hooks(
+            &crate::util::hooks::process_hook_inputs(),
+            Some(git_root.path()),
+            &compat,
+            xai_grok_hooks::trust::Trust::Trusted,
+        );
         assert!(
             !has_probe(&reg),
             "compat.claude.hooks=false: project .claude hook must NOT be loaded"
         );
 
         compat.claude.hooks = true;
-        let (reg, _errs) = crate::util::hooks::discover_hooks(Some(git_root.path()), &compat, true);
+        let (reg, _errs) = crate::util::hooks::discover_hooks(
+            &crate::util::hooks::process_hook_inputs(),
+            Some(git_root.path()),
+            &compat,
+            xai_grok_hooks::trust::Trust::Trusted,
+        );
         assert!(
             has_probe(&reg),
             "compat.claude.hooks=true: project .claude hook must be loaded"
@@ -1999,7 +1950,7 @@ extra_rule_dirs = ["/c/rules"]
                 path: "/bar/rules".into(),
             },
         ];
-        let count = apply_items_to_config(&path, &items).unwrap();
+        let count = apply_items_to_config(&path, &items, ImportScope::Global).unwrap();
         assert_eq!(count, 2);
 
         let content = std::fs::read_to_string(&path).unwrap();
@@ -2020,6 +1971,75 @@ extra_rule_dirs = ["/c/rules"]
                 .and_then(|v| v.as_str()),
             Some("/bar/rules")
         );
+    }
+
+    /// A project import must replace a `.grok/config.toml` symlink, not write the external referent.
+    #[cfg(unix)]
+    #[test]
+    fn project_import_replaces_config_symlink_not_referent() {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).unwrap();
+        let outside = tmp.path().join("outside.toml");
+        std::fs::write(&outside, "[paths]\nextra_rule_dirs = [\"/keep\"]\n").unwrap();
+        let project_cfg = tmp.path().join(".grok").join("config.toml");
+        std::fs::create_dir_all(project_cfg.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &project_cfg).unwrap();
+
+        let plan = ImportPlan {
+            project_items: vec![ImportableItem::PathEntry {
+                kind: PathKind::Skill,
+                path: "/foo/skills".into(),
+            }],
+            ..ImportPlan::default()
+        };
+        let result = apply_import(&plan, tmp.path()).unwrap();
+        assert_eq!(result.project_count, 1);
+
+        assert!(
+            !std::fs::symlink_metadata(&project_cfg)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "project slot must become a regular file"
+        );
+        let body = std::fs::read_to_string(&project_cfg).unwrap();
+        assert!(body.contains("/foo/skills"), "{body}");
+        assert!(body.contains("/keep"), "{body}");
+        assert_eq!(
+            "[paths]\nextra_rule_dirs = [\"/keep\"]\n",
+            std::fs::read_to_string(&outside).unwrap(),
+            "external referent must stay untouched"
+        );
+    }
+
+    /// A user import must write through a `config.toml` symlink and keep the slot a link.
+    #[cfg(unix)]
+    #[test]
+    fn global_import_writes_through_user_config_symlink() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = home.path().join("dotfiles").join("config.toml");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        std::fs::write(&outside, "").unwrap();
+        let slot = home.path().join("config.toml");
+        std::os::unix::fs::symlink(&outside, &slot).unwrap();
+
+        let items = vec![ImportableItem::PathEntry {
+            kind: PathKind::Skill,
+            path: "/foo/skills".into(),
+        }];
+        let count = apply_items_to_config(&slot, &items, ImportScope::Global).unwrap();
+        assert_eq!(count, 1);
+
+        assert!(
+            std::fs::symlink_metadata(&slot)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "user slot must stay a symlink"
+        );
+        assert_eq!(outside, std::fs::read_link(&slot).unwrap());
+        let body = std::fs::read_to_string(&outside).unwrap();
+        assert!(body.contains("/foo/skills"), "{body}");
     }
 
     #[test]
@@ -2053,15 +2073,17 @@ extra_rule_dirs = ["/c/rules"]
 
     #[test]
     #[serial]
-    fn gate_load_claude_json_mcp_servers_returns_empty_when_marker_set() {
+    fn gate_mcp_server_sources_report_imported_when_marker_set() {
         let _g = MarkerGuard;
         refresh_marker_cache(true);
         let dir = tempfile::tempdir().unwrap();
         let compat = xai_grok_tools::types::compat::CompatConfig::default();
-        let servers = crate::util::config::load_claude_json_mcp_servers(dir.path(), &compat);
-        assert!(
-            servers.is_empty(),
-            "load_claude_json_mcp_servers should be empty when marker set"
+
+        let sources = crate::util::config::mcp_server_sources(dir.path(), &compat, "test");
+
+        assert_eq!(
+            xai_grok_config::ClaudeImport::Imported,
+            sources.claude_import
         );
     }
 
@@ -2109,20 +2131,6 @@ extra_rule_dirs = ["/c/rules"]
                 leaked
             );
         }
-    }
-
-    #[test]
-    #[serial]
-    fn gate_merge_claude_enabled_plugins_no_op_when_marker_set() {
-        let _g = MarkerGuard;
-        refresh_marker_cache(true);
-        let mut plugins = crate::agent::config::PluginsConfig::default();
-        let before_enabled = plugins.enabled.clone();
-        let before_disabled = plugins.disabled.clone();
-        // Pass `None` for cwd: the gate fires before any file IO
-        plugins.merge_claude_enabled_plugins(None);
-        assert_eq!(plugins.enabled, before_enabled);
-        assert_eq!(plugins.disabled, before_disabled);
     }
 
     #[test]
