@@ -28,7 +28,7 @@ pub enum AllowedMcpServer {
     StdioArgv {
         argv: Vec<String>,
     },
-    /// Match by config name (any transport); see [`mcp_name_matches`].
+    /// Match by config name (any transport); see `mcp_name_matches`.
     Name {
         name: String,
     },
@@ -263,7 +263,7 @@ impl McpServerAllowlist {
     }
 
     /// Explicit `deniedMcpServers` match (vs merely missing from the
-    /// allowlist); URL denies are host-normalized via [`DenyUrlMatcher`].
+    /// allowlist); URL denies are host-normalized via `DenyUrlMatcher`.
     /// Unrecognized ACP transports fail closed when this source has deny entries.
     pub fn is_server_denied(&self, server: &agent_client_protocol::McpServer) -> bool {
         self.is_server_denied_known(server, mcp_transport_known(server))

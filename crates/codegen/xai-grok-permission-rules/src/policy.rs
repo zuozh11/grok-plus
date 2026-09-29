@@ -1,4 +1,4 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use crate::bash_command_splitting::{
     MAX_INLINE_SHELL_DEPTH, env_split_string_script, normalize_command_words,
@@ -7,9 +7,17 @@ use crate::domain::normalize_domain;
 use crate::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
-use xai_grok_paths::normalize_lexically;
 
 mod bash_commands;
+mod path_match;
+
+pub use crate::policy::path_match::resolve_following_symlinks;
+pub(crate) use crate::policy::path_match::{
+    RuleBase, SymlinkFollow, follow_absolute_symlink, path_has_parent_dir,
+};
+use crate::policy::path_match::{
+    absolute_normalized_path, path_match_forms, path_match_string, raw_absolute_tool_path,
+};
 
 /// A security-gate escalation with `Ask` provenance.
 /// The bash-command and shell-file gates only escalate (rule `Allow` is dropped), so these three arms cover every gate outcome.
@@ -216,34 +224,42 @@ impl CompiledPolicy {
         self.evaluate_with_cwd_details(access, cwd).0
     }
 
-    /// Lexical decision plus whether an unresolvable native symlink forces a prompt.
+    /// Direct rule decision plus whether an unresolvable native symlink forces a prompt
     pub(crate) fn evaluate_with_cwd_details(
         &self,
         access: &AccessKind,
         cwd: Option<&Path>,
     ) -> (Option<Decision>, bool) {
-        let lexical = self.evaluate_lexical_with_cwd(access, cwd);
+        let base = cwd.map(RuleBase::new);
+        let direct = self.evaluate_rules_with_base(access, base.as_ref());
         let Some(path) = native_file_path(access) else {
-            return (lexical, false);
+            return (direct, false);
         };
         let Some(raw_absolute) = raw_absolute_tool_path(path, cwd) else {
-            return (lexical, false);
+            return (direct, false);
         };
         let lexical_abs = path_match_string(&absolute_normalized_path(path, cwd));
-        match follow_absolute_symlink(&raw_absolute, &lexical_abs) {
+        let follow = match follow_absolute_symlink(&raw_absolute, &lexical_abs) {
+            // A `..` path gets its physical-cwd forms only from this escalate-only re-check
+            SymlinkFollow::None if path_has_parent_dir(Path::new(path)) => {
+                SymlinkFollow::Target(lexical_abs)
+            }
+            follow => follow,
+        };
+        match follow {
             SymlinkFollow::Target(resolved) => {
                 let resolved_decision = match self
-                    .evaluate_lexical_with_cwd(&access_with_path(access, resolved), cwd)
+                    .evaluate_rules_with_base(&access_with_path(access, resolved), base.as_ref())
                 {
                     Some(decision @ (Decision::Reject(_) | Decision::Ask)) => Some(decision),
                     _ => None,
                 };
-                (combine_decisions(lexical, resolved_decision), false)
+                (combine_decisions(direct, resolved_decision), false)
             }
             SymlinkFollow::Unresolvable if self.native_path_restrictions_apply(access) => {
-                (combine_decisions(lexical, Some(Decision::Ask)), true)
+                (combine_decisions(direct, Some(Decision::Ask)), true)
             }
-            SymlinkFollow::Unresolvable | SymlinkFollow::None => (lexical, false),
+            SymlinkFollow::Unresolvable | SymlinkFollow::None => (direct, false),
         }
     }
 
@@ -255,11 +271,11 @@ impl CompiledPolicy {
         })
     }
 
-    /// Lexical rule match only. Callers re-check symlink targets through this so follow cannot recurse.
-    pub(crate) fn evaluate_lexical_with_cwd(
+    /// Rule match without following the access path's symlinks, so the target re-check through it cannot recurse
+    pub(crate) fn evaluate_rules_with_base(
         &self,
         access: &AccessKind,
-        cwd: Option<&Path>,
+        base: Option<&RuleBase<'_>>,
     ) -> Option<Decision> {
         let mut matched_ask = false;
         let mut matched_allow = false;
@@ -272,7 +288,7 @@ impl CompiledPolicy {
                 rule,
                 matcher: matcher.as_ref(),
             };
-            if !pattern_matches(access, &cr, cwd) {
+            if !pattern_matches(access, &cr, base) {
                 continue;
             }
             match rule.action {
@@ -319,7 +335,7 @@ impl CompiledPolicy {
         None
     }
 
-    /// Whether narrow allow rules alone authorize this Bash command ([`AllowRuleScope::NarrowOnly`]).
+    /// Whether narrow allow rules alone authorize this Bash command (`AllowRuleScope::NarrowOnly`).
     /// A scoped rule may skip the classifier; a blanket `Bash(*)` or exec-vehicle rule stays suspended. Untrusted project rules are already dropped.
     /// Meaningful only after a full `Allow`; non-Bash access has no static findings so it bypasses without this check.
     pub fn narrow_allow_authorizes(&self, access: &AccessKind) -> bool {
@@ -590,8 +606,7 @@ const EXEC_VEHICLE_HEADS: &[&str] = &[
 /// Only a version-like suffix counts; a bare prefix match would match unrelated tools (`nodemon`, `phpunit`) and cost their narrow rules the bypass.
 const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", "php", "lua"];
 
-/// Whether the program head executes code handed to it: basename, lowercased, `.exe` stripped, against [`EXEC_VEHICLE_HEADS`] or a versioned family.
-/// `pub(crate)` so [`minimum_always_allow_scope`] floors these to the full command like dangerous verbs.
+/// Program basename, lowercased, with a trailing `.exe` stripped
 pub fn normalized_command_head(words: &[String]) -> Option<String> {
     let head = words
         .first()?
@@ -601,6 +616,8 @@ pub fn normalized_command_head(words: &[String]) -> Option<String> {
     Some(head.strip_suffix(".exe").unwrap_or(&head).to_owned())
 }
 
+/// Whether the program head executes code handed to it: basename, lowercased, `.exe` stripped, against `EXEC_VEHICLE_HEADS` or a versioned family.
+/// Public so the workspace crate's `minimum_always_allow_scope` floors these to the full command like dangerous verbs.
 pub fn head_is_exec_vehicle(words: &[String]) -> bool {
     let Some(head) = normalized_command_head(words) else {
         return false;
@@ -618,7 +635,7 @@ pub fn head_is_exec_vehicle(words: &[String]) -> bool {
     })
 }
 
-/// Whether a bash glob matches every [`bash_probes`] probe (same set as [`rule_is_catchall`]), so `*`, `**`, `?*` are refused.
+/// Whether a bash glob matches every `bash_probes` probe (same set as [`rule_is_catchall`]), so `*`, `**`, `?*` are refused.
 /// Shared with the pattern editor's save gate so the two cannot drift.
 pub fn bash_glob_is_catchall(pattern: &str) -> bool {
     bash_probes().iter().all(|access| match access {
@@ -688,7 +705,11 @@ pub fn bash_pattern_is_broad(pattern: &str) -> bool {
     pattern == "*" || !pattern.contains(char::is_whitespace)
 }
 
-fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
+fn pattern_matches(
+    access: &AccessKind,
+    cr: &CompiledRule<'_>,
+    base: Option<&RuleBase<'_>>,
+) -> bool {
     let pattern = match cr.rule.pattern.as_deref() {
         Some(p) => p,
         None => return true,
@@ -704,13 +725,13 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
-        AccessKind::Edit(path) => path_context_matches(path, cr, cwd),
+        AccessKind::Edit(path) => path_context_matches(path, cr, base),
         AccessKind::Read(path) => match path {
-            Some(p) => path_context_matches(p, cr, cwd),
+            Some(p) => path_context_matches(p, cr, base),
             None => false,
         },
         AccessKind::Grep { path, .. } => match path {
-            Some(p) => path_context_matches(p, cr, cwd),
+            Some(p) => path_context_matches(p, cr, base),
             None => false,
         },
         AccessKind::MCPTool { name, .. } => glob_matches(name, MatchContext::Freeform, cr.matcher),
@@ -738,59 +759,10 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
 
 /// Match Read/Edit/Grep after lexical normalize and cwd-join.
 /// Rooted patterns drop `..` and exist only under the cwd, so `Read(./**)` cannot be escaped by traversal; unrooted `*` / leading `**` keep any-depth meaning.
-fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
-    path_match_forms(path, cwd)
+fn path_context_matches(path: &str, cr: &CompiledRule<'_>, base: Option<&RuleBase<'_>>) -> bool {
+    path_match_forms(path, base)
         .iter()
         .any(|text| glob_matches(text, MatchContext::Path, cr.matcher))
-}
-
-/// Normalized absolute form, plus cwd-relative and `./`-prefixed spellings when the path is under cwd (so `Read(./**)` matches bare `src/main.rs`).
-/// Normalization never leaves `.`/`..` in the forms, so a relative spelling is produced only for paths genuinely under the cwd.
-/// Tilde paths are matched literally only (see [`is_tilde_path`]).
-fn path_match_forms(path: &str, cwd: Option<&Path>) -> Vec<String> {
-    let abs = absolute_normalized_path(path, cwd);
-    let mut forms = vec![path_match_string(&abs)];
-
-    if let Some(cwd) = cwd {
-        if let Ok(rel) = abs.strip_prefix(normalize_lexically(cwd)) {
-            let rel_s = path_match_string(rel);
-            if rel_s.is_empty() || rel_s == "." {
-                forms.extend([".".to_owned(), "./".to_owned()]);
-            } else {
-                forms.push(format!("./{rel_s}"));
-                forms.push(rel_s);
-            }
-        }
-    } else if abs.is_relative() && !path_has_parent_dir(&abs) && !is_tilde_path(&abs) {
-        // No session cwd: still offer `./form` so `./**` matches bare relatives.
-        let lex_s = path_match_string(&abs);
-        if lex_s != "." && !lex_s.is_empty() {
-            forms.push(format!("./{lex_s}"));
-        }
-    }
-    forms
-}
-
-fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
-    let raw = Path::new(path);
-    if is_tilde_path(raw) {
-        // Kept raw: no cwd-join and no collapse; collapsing `~/../x` to `x` would make it look workspace-relative
-        return raw.to_path_buf();
-    }
-    let joined = match cwd {
-        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
-        _ => raw.to_path_buf(),
-    };
-    normalize_lexically(&joined)
-}
-
-/// A leading `~` is expanded to home by the tools *after* this gate, so it must never be treated as cwd-relative.
-/// A manufactured `./~/…` would satisfy `./**` while escaping to home; tilde paths are matched literally, as patterns treat `~`.
-fn is_tilde_path(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Normal(first)) if first.to_string_lossy().starts_with('~')
-    )
 }
 
 fn native_file_path(access: &AccessKind) -> Option<&str> {
@@ -813,107 +785,6 @@ fn access_with_path(access: &AccessKind, path: String) -> AccessKind {
             glob: glob.clone(),
         },
         _ => unreachable!("caller filters via native_file_path"),
-    }
-}
-
-/// Cwd-join without collapsing `.`/`..`, so physical resolve sees `..` after a link.
-fn raw_absolute_tool_path(path: &str, cwd: Option<&Path>) -> Option<String> {
-    let raw = Path::new(path);
-    if is_tilde_path(raw) {
-        return None;
-    }
-    let joined = match cwd {
-        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
-        _ => raw.to_path_buf(),
-    };
-    joined.is_absolute().then(|| path_match_string(&joined))
-}
-
-fn path_match_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn path_has_parent_dir(path: &Path) -> bool {
-    path.components().any(|c| matches!(c, Component::ParentDir))
-}
-
-/// True if any existing component of `absolute` is a symlink.
-fn path_has_symlink(absolute: &str) -> bool {
-    let path = Path::new(absolute);
-    if !path.is_absolute() {
-        return false;
-    }
-    let mut prefix = PathBuf::new();
-    for comp in path.components() {
-        prefix.push(comp);
-        if std::fs::symlink_metadata(&prefix).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Canonical target, or `None` on relative input, cycles, depth limits, or fs errors.
-fn resolve_symlink_target(absolute: &str) -> Option<String> {
-    let path = Path::new(absolute);
-    if !path.is_absolute() {
-        return None;
-    }
-    let resolved = resolve_following_symlinks(path)?;
-    Some(path_match_string(&normalize_lexically(&resolved)))
-}
-
-/// Follow every symlink, including dangling leaves and missing trailing components.
-pub fn resolve_following_symlinks(path: &Path) -> Option<PathBuf> {
-    fn walk(path: &Path, depth: usize) -> Option<PathBuf> {
-        const MAX_SYMLINK_DEPTH: usize = 40;
-        if depth > MAX_SYMLINK_DEPTH {
-            return None;
-        }
-        // `dunce` avoids Windows `\\?\` verbatim paths (repo convention).
-        if let Ok(canonical) = dunce::canonicalize(path) {
-            return Some(canonical);
-        }
-        // Parent-first so a dangling or not-yet-created leaf still follows links.
-        let parent = path.parent()?;
-        let file_name = path.file_name()?;
-        let resolved_parent = walk(parent, depth + 1)?;
-        let candidate = resolved_parent.join(file_name);
-        // NotFound is a new path; any other metadata error fails closed.
-        let metadata = match std::fs::symlink_metadata(&candidate) {
-            Ok(metadata) => Some(metadata),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(_) => return None,
-        };
-        if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
-            // Unreadable link target fails closed rather than treating the link path as real.
-            let target = std::fs::read_link(&candidate).ok()?;
-            let target = if target.is_absolute() {
-                target
-            } else {
-                resolved_parent.join(target)
-            };
-            return walk(&target, depth + 1);
-        }
-        Some(candidate)
-    }
-    walk(path, 0)
-}
-
-/// The result of following symlinks on an absolute path, used by the escalate-only re-checks.
-#[derive(Debug)]
-pub(crate) enum SymlinkFollow {
-    None,
-    Target(String),
-    Unresolvable,
-}
-
-pub(crate) fn follow_absolute_symlink(raw_absolute: &str, lexical_absolute: &str) -> SymlinkFollow {
-    match resolve_symlink_target(raw_absolute) {
-        Some(resolved) if resolved != lexical_absolute => SymlinkFollow::Target(resolved),
-        Some(_) => SymlinkFollow::None,
-        None if path_has_symlink(raw_absolute) => SymlinkFollow::Unresolvable,
-        None => SymlinkFollow::None,
     }
 }
 
@@ -1004,7 +875,7 @@ fn agent_message_probes() -> Vec<AccessKind> {
         .collect()
 }
 /// Whether an Allow rule fully opens a `--yolo`-substitute dimension (a blanket grant, not a scoped one).
-/// Probes run through the real evaluator [`pattern_matches`] so detection can't drift: `*://*` and `*__*` are judged as enforced.
+/// Probes run through the real evaluator `pattern_matches` so detection can't drift: `*://*` and `*__*` are judged as enforced.
 /// `Any` counts when it opens any of Bash/MCP/WebFetch/AgentMessage (catching globs like `?*` and `*://*`); Read/Edit/Grep are file-access only.
 pub fn rule_is_catchall(rule: &PermissionRule) -> bool {
     // Compile the matcher as `CompiledPolicy::new` does, so probing matches enforcement
@@ -1074,7 +945,7 @@ mod tests {
             rule,
             matcher: matcher.as_ref(),
         };
-        pattern_matches(access, &cr, cwd)
+        pattern_matches(access, &cr, cwd.map(RuleBase::new).as_ref())
     }
 
     #[test]
@@ -2684,7 +2555,8 @@ mod tests {
             );
         }
 
-        let ws = tempfile::tempdir().unwrap();
+        // The symlink target resolves physically, so the rule base must not sit under macOS `/var -> /private/var`
+        let ws = tempfile::tempdir_in(dunce::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
         std::fs::write(ws.path().join("notes.toml"), b"alpha = 1\n").unwrap();
         std::fs::create_dir(ws.path().join("sub")).unwrap();
         let read = CompiledPolicy::new(PermissionConfig::new(vec![

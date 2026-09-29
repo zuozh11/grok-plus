@@ -935,4 +935,4 @@ fn resolve_yolo_policy_block<'a>(
 
 #[cfg(test)]
 #[path = "resolution_tests.rs"]
-mod tests;
+pub(crate) mod tests;

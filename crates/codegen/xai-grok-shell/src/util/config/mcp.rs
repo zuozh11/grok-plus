@@ -9,9 +9,8 @@ use xai_grok_tools::types::compat::{CompatConfig, CompatConfigToml};
 
 use xai_grok_config::ClaudeImport;
 pub(crate) use xai_grok_config::mcp_servers::{
-    MCP_SCOPE_PROJECT, McpEnabledFilter, get_mcp_server_config,
-    load_claude_json_mcp_servers_as_configs_unfiltered, load_mcp_json_file, load_mcp_preferences,
-    materialize_mcp_config, parse_mcp_servers_from_toml,
+    MCP_SCOPE_PROJECT, McpEnabledFilter, get_mcp_server_config, load_mcp_json_file,
+    load_mcp_preferences, materialize_mcp_config, parse_mcp_servers_from_toml,
 };
 use xai_grok_config::mcp_servers::{
     MCP_SCOPE_USER, McpPreferencesLoad, McpServerSources, load_cursor_mcp_servers_as_configs,
@@ -801,14 +800,6 @@ pub(crate) fn get_all_mcp_disabled_tools(
     _cwd: &std::path::Path,
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
     xai_grok_config::mcp_servers::get_all_mcp_disabled_tools()
-}
-
-pub(crate) fn load_mcp_json_servers_as_configs_unfiltered(
-    cwd: &std::path::Path,
-) -> IndexMap<String, McpServerConfig> {
-    xai_grok_config::mcp_servers::load_mcp_json_servers_as_configs_unfiltered(&find_mcp_json_files(
-        cwd,
-    ))
 }
 
 pub fn load_mcp_server_configs_with_project(

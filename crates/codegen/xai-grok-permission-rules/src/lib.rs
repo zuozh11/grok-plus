@@ -9,6 +9,7 @@ pub mod claude_settings;
 pub mod domain;
 pub mod env_risk;
 pub mod exec_risk;
+pub mod folder_trust;
 pub mod gate_preflight;
 pub mod git_content_filters;
 pub mod managed_policy;
@@ -23,6 +24,7 @@ pub mod source_identity;
 pub mod trust;
 pub mod types;
 pub mod util;
+mod worktree;
 
 #[cfg(test)]
 mod test_support;

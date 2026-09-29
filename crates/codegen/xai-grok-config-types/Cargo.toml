@@ -13,7 +13,6 @@ toml = { workspace = true }
 tracing = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
-xai-grok-version = { workspace = true }
 
 [features]
 default-bazel = []

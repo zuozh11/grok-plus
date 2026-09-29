@@ -10,7 +10,7 @@ use toml::Value as TomlValue;
 
 use crate::trust::{TrustStore, workspace_key};
 
-pub use xai_grok_config_types::trust::{
+pub use xai_grok_permission_rules::folder_trust::{
     DecideInputs, PromptPolicy, TrustDecision, TrustDurability, TrustLevel, TrustOutcome,
     TrustResolution, decide, feature_enabled, folder_trust_inert, resolve_trust,
 };

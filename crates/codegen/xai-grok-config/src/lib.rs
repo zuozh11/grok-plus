@@ -62,7 +62,7 @@ pub use global_hook_sources::{
     unique_ancestors_rootward,
 };
 
-pub use claude_import::{ClaudeImport, is_claude_import_marked};
+pub use claude_import::{ClaudeImport, is_claude_import_marked, user_config_file};
 pub use config_layers::{
     CampaignsState, ConfigLayers, campaigns_application_disabled, campaigns_state_path,
     load_dismissed_ids, load_dismissed_ids_from_home, load_effective_config_disk_only,
@@ -80,7 +80,8 @@ pub use global_hook_sources::{
 };
 
 pub use config_requirements::{
-    AllowlistPin, RequirementsToml, RequirementsWithSources, Sourced, ToolFeature,
+    AllowlistPin, CliStringPins, RequirementsToml, ServiceTogglePins, Sourced, ToolFeature,
+    UploadTelemetryPins,
 };
 pub use loader::{
     HookConfigLayer, HookProvenance, MANAGED_CONFIG_FILENAME, ManagedConfigLayer,
@@ -122,7 +123,7 @@ pub use remote_settings::{
     LongReasoningReminderSettings, RemoteRequestEncoding, RemoteSettings, WorktreeAutoGcSettings,
     WorktreeKindMaxAge, deserialize_tolerant,
 };
-pub use resolved::{ConfigSource, Resolved, resolve_string_flag};
+pub use resolved::{BoolFlag, ConfigSource, Resolved, resolve_string_flag};
 pub use validation::{
     RequirementsError, RequirementsLayer, RequirementsSource, load_merged_requirements,
     requirements_layers, validate_requirements,

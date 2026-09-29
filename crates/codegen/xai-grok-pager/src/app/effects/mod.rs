@@ -5664,10 +5664,12 @@ pub(crate) fn spawn_ordered_interjects(
                 if let Err(e) = acp_send(request, &tx).await {
                     let mut leftover = vec![(text, interjection_id, blocks)];
                     leftover.extend(pending);
+                    let detail = invalid_params_detail(&e)
+                        .unwrap_or_else(|| e.to_string());
                     return TaskResult::InterjectFailed {
                         agent_id,
                         error: sanitize_user_error(
-                            &format!("couldn't send interjection: {e}"),
+                            &format!("couldn't send interjection: {detail}"),
                         ),
                         remaining: leftover,
                     };

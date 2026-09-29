@@ -92,34 +92,27 @@ mod tests {
 
     #[test]
     fn find_project_configs_excludes_user_grok_config_file() {
-        let Some(user_home) = xai_grok_config::user_grok_home() else {
-            return;
-        };
+        let home = tempfile::tempdir().unwrap();
+        let user_home = home.path().join(".grok");
+        std::fs::create_dir_all(&user_home).unwrap();
         let user_config = user_home.join("config.toml");
-        if user_config.is_file() {
-            let home = xai_dirs::home_dir().expect("home dir");
-            let from_home = find_project_configs(&home);
-            assert!(
-                !from_home
-                    .iter()
-                    .any(|p| is_user_grok_config_file(p, Some(&user_home))),
-                "user config leaked into project configs: {from_home:?}"
-            );
-            assert!(is_user_grok_config_file(&user_config, Some(&user_home)));
-        }
+        std::fs::write(&user_config, "# user\n").unwrap();
+        let from_home =
+            find_project_configs_under(home.path(), Some(home.path()), Some(&user_home));
+        assert!(
+            from_home.is_empty(),
+            "user config leaked into project configs: {from_home:?}"
+        );
+        assert!(is_user_grok_config_file(&user_config, Some(&user_home)));
 
-        let tmp = tempfile::tempdir().unwrap();
-        let project = tmp.path().join("repo");
+        let project = home.path().join("repo");
         std::fs::create_dir_all(project.join(".grok")).unwrap();
         std::fs::write(project.join(".grok/config.toml"), "# project\n").unwrap();
-        let found = find_project_configs(&project);
+        let found = find_project_configs_under(&project, Some(home.path()), Some(&user_home));
         assert_eq!(found.len(), 1);
         let Some(first) = found.first() else {
             panic!("expected one project config: {found:?}");
         };
-        assert!(!is_user_grok_config_file(
-            first,
-            xai_grok_config::user_grok_home().as_deref()
-        ));
+        assert!(!is_user_grok_config_file(first, Some(&user_home)));
     }
 }

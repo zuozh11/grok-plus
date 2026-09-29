@@ -1629,6 +1629,48 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
     assert!(!saw_wrong_action.load(Ordering::SeqCst));
     assert!(!saw_success_notification.load(Ordering::SeqCst));
 }
+/// A refused interjection shows the refusal's own sentence, as a refused prompt does
+#[tokio::test]
+async fn refused_interjection_shows_the_refusal_sentence() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = msg {
+                let refusal = acp::Error::invalid_params()
+                    .data("Update Grok on \"desk\" to send images.");
+                let _ = args.response_tx.send(Err(refusal));
+            }
+        }
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::SendInterject {
+            agent_id: AgentId(4),
+            session_id: acp::SessionId::new("test-session"),
+            text: "look".to_owned(),
+            interjection_id: "i-1".to_owned(),
+            blocks: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    let TaskResult::InterjectFailed { error, .. } = result else {
+        panic!("expected InterjectFailed, got {result:?}");
+    };
+    assert_eq!(
+            "couldn't send interjection: Update Grok on \"desk\" to send images.",
+            error
+        );
+}
 #[tokio::test]
 async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

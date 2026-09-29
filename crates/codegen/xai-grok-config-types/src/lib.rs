@@ -18,7 +18,6 @@ mod privacy;
 pub use privacy::{PrivacyMode, SharedPrivacyMode};
 mod sandbox;
 pub use sandbox::*;
-pub mod trust;
 
 pub use xai_grok_config::{
     CampaignOverride, ConsentGate, ContextualHintsRemote, DisplayRefreshSettings,

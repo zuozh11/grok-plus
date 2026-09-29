@@ -3,11 +3,13 @@
 use indexmap::IndexMap;
 
 use super::{
-    Commit, ModelFetchAuth, ModelsCacheScope, ModelsPrefetch, evaluate_models_commit,
-    fetch_models_uncommitted, models_fetch_enabled, resolve_disk_auth,
-    resolve_live_models_cache_scope, resolve_models_cache_scope,
+    ModelFetchAuth, ModelsCacheScope, fetch_models_uncommitted, models_fetch_enabled,
+    resolve_disk_auth, resolve_live_models_cache_scope, resolve_models_cache_scope,
 };
 use crate::agent::config::{self, ModelEntry};
+use xai_grok_cloud_config::remote_settings::{
+    InitialModelsLoad, fetch_catalog_blocking, run_catalog_prefetch, start_catalog_load,
+};
 use xai_grok_login::{GrokAuth, GrokComConfig};
 
 pub(crate) struct PrefetchInputs {
@@ -49,37 +51,6 @@ pub(crate) fn resolve_prefetch_inputs_from_parts(
         endpoints,
         model_fetch_auth,
     })
-}
-
-/// Joinable initial catalog prefetch. Runs on its own OS thread and reports
-/// through a `oneshot`; a timeout or cancel drops the receiver while the thread
-/// still lands its monotonic cache write for the next boot.
-#[must_use]
-pub(crate) struct InitialModelsLoad(
-    tokio::sync::oneshot::Receiver<Option<IndexMap<String, ModelEntry>>>,
-);
-
-impl InitialModelsLoad {
-    pub(crate) async fn join(
-        self,
-        cancel: &tokio_util::sync::CancellationToken,
-        timeout: std::time::Duration,
-    ) -> Option<IndexMap<String, ModelEntry>> {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => None,
-            received = tokio::time::timeout(timeout, self.0) => match received {
-                Ok(Ok(models)) => models,
-                Ok(Err(_sender_dropped)) => None,
-                Err(_elapsed) => {
-                    tracing::info!(
-                        "initial models prefetch timed out; catalog freeze uses bundled defaults"
-                    );
-                    None
-                }
-            },
-        }
-    }
 }
 
 /// Catalog from the async pre-resolve. Outer `Option`: whether pre-resolve ran;
@@ -125,112 +96,57 @@ fn run_models_prefetch(
     plan: ModelsPrefetchPlan,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Option<IndexMap<String, ModelEntry>> {
-    if cancel.is_cancelled() {
-        return None;
-    }
     let ModelsPrefetchPlan {
         env,
         expected,
         commit_config,
     } = plan;
-    match fetch_models_uncommitted(
-        &env.endpoints,
-        env.auth.as_ref(),
-        env.model_fetch_auth,
-        true,
-    ) {
-        ModelsPrefetch::Cached(models) => Some(models),
-        ModelsPrefetch::Fetched(write) => {
-            // Re-resolve the live scope under the fetch-time mode (stable origin) but with live disk
-            // auth for identity, so an alpha flip, key rotation, or account switch is caught without
-            // abandoning the catalog when disk auth is briefly absent.
-            let live =
-                resolve_live_models_cache_scope(env.model_fetch_auth, commit_config.as_ref());
-            let fetch_enabled = models_fetch_enabled(&env.endpoints, env.auth.as_ref());
-            match evaluate_models_commit(&expected, &live, fetch_enabled) {
-                Commit::CacheAndServe => Some(write.commit()),
-                Commit::ServeInMemory => {
-                    tracing::info!(
-                        "models fetch served in memory; not cached until the session persists"
-                    );
-                    Some(write.into_models())
-                }
-                Commit::Retry | Commit::Abandon => {
-                    tracing::info!("models load discarded fetch: policy or origin changed");
-                    None
-                }
-            }
-        }
-        ModelsPrefetch::Unavailable => None,
-    }
-}
-
-/// Run one catalog prefetch on its own OS thread, delivering the result through
-/// `deliver`. An own thread, not `spawn_blocking`: the fetch creates and drops
-/// its own runtime, which panics inside a tokio context.
-fn spawn_prefetch_thread(
-    name: &str,
-    plan: ModelsPrefetchPlan,
-    cancel: tokio_util::sync::CancellationToken,
-    deliver: impl FnOnce(Option<IndexMap<String, ModelEntry>>) + Send + 'static,
-) -> Option<()> {
-    std::thread::Builder::new()
-        .name(name.into())
-        .spawn(move || deliver(run_models_prefetch(plan, &cancel)))
-        .ok()
-        .map(|_| ())
+    let fetch_auth = env.model_fetch_auth;
+    let endpoints = env.endpoints;
+    let auth = env.auth;
+    run_catalog_prefetch(
+        cancel,
+        &expected,
+        || fetch_models_uncommitted(&endpoints, auth.as_ref(), fetch_auth, true),
+        // Re-resolve under the fetch-time mode (stable origin) with live disk auth,
+        // so an alpha flip, key rotation, or account switch is caught without
+        // abandoning the catalog when disk auth is briefly absent.
+        || {
+            (
+                resolve_live_models_cache_scope(fetch_auth, commit_config.as_ref()),
+                models_fetch_enabled(&endpoints, auth.as_ref()),
+            )
+        },
+    )
 }
 
 pub(crate) fn start_initial_models_load(
     cancel: tokio_util::sync::CancellationToken,
     grok_com_config: Option<GrokComConfig>,
     warmed_auth: Option<GrokAuth>,
-) -> Option<InitialModelsLoad> {
+) -> Option<InitialModelsLoad<ModelEntry>> {
     let plan = models_prefetch_inputs(grok_com_config, warmed_auth)?;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    spawn_prefetch_thread("grok-models-prefetch", plan, cancel, move |models| {
-        let _ = tx.send(models);
-    })?;
-    Some(InitialModelsLoad(rx))
+    start_catalog_load("grok-models-prefetch", cancel, move |cancel| {
+        run_models_prefetch(plan, cancel)
+    })
 }
 
 /// Poll slice bounding the sync models wait so a bootstrap cancel is observed promptly.
 const MODELS_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Synchronous catalog prefetch for a bootstrap that had no async pre-resolve.
-/// A cancel or the fetch timeout ends the wait; the thread still lands its
-/// monotonic commit for the next boot.
+/// A cancel or the fetch timeout ends the wait; the thread still lands its monotonic commit.
 pub(crate) fn fetch_initial_models_blocking(
     cancel: &tokio_util::sync::CancellationToken,
     grok_com_config: Option<GrokComConfig>,
     warmed_auth: Option<GrokAuth>,
 ) -> Option<IndexMap<String, ModelEntry>> {
     let plan = models_prefetch_inputs(grok_com_config, warmed_auth)?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    spawn_prefetch_thread(
+    fetch_catalog_blocking(
         "grok-models-prefetch-sync",
-        plan,
-        cancel.clone(),
-        move |models| {
-            let _ = tx.send(models);
-        },
-    )?;
-    let started = std::time::Instant::now();
-    loop {
-        if cancel.is_cancelled() {
-            return None;
-        }
-        let remaining = crate::http::STARTUP_FETCH_TIMEOUT.saturating_sub(started.elapsed());
-        if remaining.is_zero() {
-            tracing::info!(
-                "initial models prefetch timed out; catalog freeze uses bundled defaults"
-            );
-            return None;
-        }
-        match rx.recv_timeout(remaining.min(MODELS_WAIT_POLL_INTERVAL)) {
-            Ok(models) => return models,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
-        }
-    }
+        cancel,
+        crate::http::STARTUP_FETCH_TIMEOUT,
+        MODELS_WAIT_POLL_INTERVAL,
+        move |cancel| run_models_prefetch(plan, cancel),
+    )
 }

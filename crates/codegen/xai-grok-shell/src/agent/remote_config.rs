@@ -25,20 +25,25 @@ pub(crate) use resolution::{
     resolve_catalog_key, resolve_default_model, resolve_model_catalog,
     selectable_catalog_key_for_persisted, validate_selectable,
 };
+#[cfg(test)]
+pub(in crate::agent::remote_config) use xai_grok_cloud_config::Commit;
 pub(in crate::agent) use xai_grok_cloud_config::SettingsRefresh;
 pub(crate) use xai_grok_cloud_config::remote_settings::{
     DegradedStartCause, ModelGlobSet, ModelsCacheScope, is_campaign_only_flip,
     record_degraded_start,
 };
-pub(in crate::agent::remote_config) use xai_grok_cloud_config::{Commit, resolve_disk_auth};
+pub(in crate::agent::remote_config) use xai_grok_cloud_config::resolve_disk_auth;
 
 pub(in crate::agent::remote_config) type ModelsCacheManager =
     xai_grok_cloud_config::remote_settings::ModelsCacheManager<crate::agent::config::ModelEntry>;
 
 pub(crate) use endpoint::{HttpModelsEndpoint, ModelsEndpoint};
+pub(in crate::agent::remote_config) use fetch::fetch_models_uncommitted;
 pub(crate) use fetch::prefetch_models_blocking;
-pub(in crate::agent::remote_config) use fetch::{ModelsPrefetch, fetch_models_uncommitted};
 pub(crate) use manager::ModelsManager;
+#[cfg(test)]
+pub(in crate::agent::remote_config) use xai_grok_cloud_config::remote_settings::ModelsPrefetch;
+#[cfg(test)]
 pub(in crate::agent::remote_config) use xai_grok_cloud_config::remote_settings::evaluate_models_commit;
 
 // Re-exports reached only through the manager test module.

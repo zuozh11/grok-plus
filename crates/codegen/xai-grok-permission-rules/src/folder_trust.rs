@@ -1,6 +1,6 @@
 use toml::Value as TomlValue;
 
-use crate::{BoolFlag, RemoteSettings};
+use xai_grok_config::{BoolFlag, RemoteSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustLevel {
@@ -304,7 +304,7 @@ mod tests {
         }
     }
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::ENV_TEST_LOCK as ENV_LOCK;
 
     fn isolated_home() -> (std::sync::MutexGuard<'static, ()>, TempHome, EnvVar, EnvVar) {
         let lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn local_build_ignores_remote_rollout() {
         let (_lock, _home, _home_var, _flag) = isolated_home();
-        let remote = crate::RemoteSettings {
+        let remote = xai_grok_config::RemoteSettings {
             folder_trust_enabled: Some(true),
             ..Default::default()
         };
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn release_build_keeps_gate_when_enabled() {
         let (_lock, _home, _home_var, _flag) = isolated_home();
-        let remote = crate::RemoteSettings {
+        let remote = xai_grok_config::RemoteSettings {
             folder_trust_enabled: Some(true),
             ..Default::default()
         };

@@ -102,6 +102,7 @@ xai-file-utils = { path = "../xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-external-agent-migration = { workspace = true }
 xai-grok-feedback = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types", optional = true }
 xai-tool-types = { workspace = true }

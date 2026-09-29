@@ -1,10 +1,5 @@
-//! The `[claude_compat] imported = true` marker in the user `config.toml`.
-//! Once it is set, runtime fallbacks stop reading `.claude/`.
+use std::path::{Path, PathBuf};
 
-use std::path::Path;
-
-/// Whether the user imported their Claude settings into Grok (`[claude_compat] imported`).
-/// When imported, Grok skips Claude hook sources and Claude-owned MCP configs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaudeImport {
     Imported,
@@ -22,10 +17,14 @@ impl ClaudeImport {
     }
 }
 
-/// Whether `<grok_home>/config.toml` sets `[claude_compat] imported = true`.
-/// A missing file, a missing key, or a file that does not parse reads as not imported.
+#[must_use]
+pub fn user_config_file(grok_home: &Path) -> PathBuf {
+    grok_home.join(crate::USER_CONFIG_FILENAME)
+}
+
+// A missing file, a missing key, or invalid TOML counts as not imported.
 pub fn is_claude_import_marked(grok_home: &Path) -> bool {
-    let Ok(contents) = std::fs::read_to_string(grok_home.join(crate::USER_CONFIG_FILENAME)) else {
+    let Ok(contents) = std::fs::read_to_string(user_config_file(grok_home)) else {
         return false;
     };
     let Ok(config) = toml::from_str::<toml::Value>(&contents) else {

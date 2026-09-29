@@ -159,6 +159,7 @@ xai-grok-agent = { path = "../xai-grok-agent" }
 xai-grok-bundle = { workspace = true }
 xai-grok-cloud-config = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-grok-external-agent-migration = { workspace = true }
 xai-grok-feedback = { workspace = true }
 xai-grok-config-types = { workspace = true }
 xai-grok-env = { workspace = true }
@@ -294,10 +295,6 @@ required-features = ["test-support"]
 
 [[test]]
 name = "session_create_hook_deferral"
-required-features = ["test-support"]
-
-[[test]]
-name = "e2e_grove_worktree"
 required-features = ["test-support"]
 
 [[test]]

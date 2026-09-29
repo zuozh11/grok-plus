@@ -1095,11 +1095,8 @@ fn apply_requirements_inner(
     }
     let parsed = xai_grok_config::RequirementsToml::from_value(req);
     let tool_pins: Vec<_> = parsed.tool_pins().collect();
-    let xai_grok_config::RequirementsToml {
-        allowed_models,
-        default_model,
-        ..
-    } = parsed;
+    let allowed_models = parsed.models.allowed_models.clone();
+    let default_model = parsed.models.default_model.clone();
     let mut enforced: Vec<EnforcedField> = Vec::new();
     let mut push = |path: &'static str, value: String| {
         enforced.push(EnforcedField {
@@ -1108,26 +1105,6 @@ fn apply_requirements_inner(
             source: source.clone(),
         });
     };
-    macro_rules! enforce_opt {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_bool(req, $section, $key)
-                && $field != Some(val)
-            {
-                $field = Some(val);
-                push(concat!($section, ".", $key), format!("{val}"));
-            }
-        };
-    }
-    macro_rules! enforce_val {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_bool(req, $section, $key)
-                && $field != val
-            {
-                $field = val;
-                push(concat!($section, ".", $key), format!("{val}"));
-            }
-        };
-    }
     use crate::agent::config::TelemetryMode;
     let req_telemetry_mode = req_str(req, "features", "telemetry")
         .and_then(TelemetryMode::parse)
@@ -1214,12 +1191,20 @@ fn apply_requirements_inner(
             push("telemetry.trace_upload", format!("{val}"));
         }
     }
-    enforce_opt!("cli", "auto_update", config.cli.auto_update);
-    enforce_opt!("cli", "use_leader", config.cli.use_leader);
-    enforce_opt!("cli", "show_tips", config.cli.show_tips);
-    enforce_opt!("memory", "enabled", config.memory.enabled);
-    enforce_val!("subagents", "enabled", config.subagents.enabled);
-    enforce_val!("managed_mcps", "enabled", config.managed_mcps.enabled);
+    parsed.enforce_cli_toggles(
+        &mut config.cli.auto_update,
+        &mut config.cli.use_leader,
+        &mut config.cli.show_tips,
+        &mut push,
+    );
+    parsed.enforce_service_toggles(
+        &mut xai_grok_config::ServiceTogglePins {
+            memory_enabled: &mut config.memory.enabled,
+            subagents_enabled: &mut config.subagents.enabled,
+            managed_mcps_enabled: &mut config.managed_mcps.enabled,
+        },
+        &mut push,
+    );
     if let Some(val) = req_bool(req, "tools", "respect_gitignore") {
         config
             .requirements
@@ -1237,31 +1222,13 @@ fn apply_requirements_inner(
             push("ui.yolo", "--yolo blocked".to_string());
         }
     }
-    macro_rules! enforce_str {
-        ($section:expr, $key:expr, $field:expr) => {
-            if let Some(val) = req_str(req, $section, $key)
-                && $field.as_deref() != Some(val)
-            {
-                $field = Some(val.to_owned());
-                push(concat!($section, ".", $key), val.to_owned());
-            }
-        };
-        ($section:expr, $key:expr, $field:expr, redacted) => {
-            if let Some(val) = req_str(req, $section, $key)
-                && $field.as_deref() != Some(val)
-            {
-                $field = Some(val.to_owned());
-                push(concat!($section, ".", $key), "[redacted]".to_owned());
-            }
-        };
-    }
     if let Some(val) = default_model
         && config.models.default.as_deref() != Some(val.as_str())
     {
         push("models.default", val.clone());
         config.models.default = Some(val);
     }
-    enforce_str!("models", "web_search", config.models.web_search);
+    parsed.enforce_web_search(&mut config.models.web_search, &mut push);
     if let Some(pin) = allowed_models {
         use crate::agent::config::AllowlistPin;
         let reported = match &pin {
@@ -1272,18 +1239,15 @@ fn apply_requirements_inner(
         config.requirements.allowed_models.pin(pin, source.clone());
         push("models.allowed_models", reported);
     }
-    enforce_str!("cli", "channel", config.cli.channel);
-    enforce_str!("cli", "minimum_version", config.cli.minimum_version);
-    enforce_str!("cli", "maximum_version", config.cli.maximum_version);
-    enforce_str!(
-        "cli",
-        "required_minimum_version",
-        config.cli.required_minimum_version
-    );
-    enforce_str!(
-        "cli",
-        "required_maximum_version",
-        config.cli.required_maximum_version
+    parsed.enforce_cli_strings(
+        &mut xai_grok_config::CliStringPins {
+            channel: &mut config.cli.channel,
+            minimum_version: &mut config.cli.minimum_version,
+            maximum_version: &mut config.cli.maximum_version,
+            required_minimum_version: &mut config.cli.required_minimum_version,
+            required_maximum_version: &mut config.cli.required_maximum_version,
+        },
+        &mut push,
     );
     if let Some(val) = req_str(req, "endpoints", "xai_api_base_url")
         && config.endpoints.xai_api_base_url != val
@@ -1297,15 +1261,10 @@ fn apply_requirements_inner(
         config.endpoints.cli_chat_proxy_base_url = Some(val.to_owned());
         push("endpoints.cli_chat_proxy_base_url", val.to_owned());
     }
-    enforce_str!(
-        "endpoints",
-        "models_base_url",
-        config.endpoints.models_base_url
-    );
-    enforce_str!(
-        "endpoints",
-        "models_list_url",
-        config.endpoints.models_list_url
+    parsed.enforce_model_urls(
+        &mut config.endpoints.models_base_url,
+        &mut config.endpoints.models_list_url,
+        &mut push,
     );
     if let Some(val) = req_str(req, "sandbox", "profile") {
         config
@@ -1327,65 +1286,22 @@ fn apply_requirements_inner(
             push("sandbox.auto_allow_bash", format!("{val}"));
         }
     }
-    enforce_str!(
-        "endpoints",
-        "trace_upload_url",
-        config.endpoints.trace_upload_url
-    );
-    enforce_str!(
-        "endpoints",
-        "feedback_base_url",
-        config.endpoints.feedback_base_url
-    );
-    enforce_str!(
-        "endpoints",
-        "deployment_key",
-        config.endpoints.deployment_key,
-        redacted
-    );
-    enforce_str!("telemetry", "events_url", config.telemetry.events_url);
-    enforce_str!(
-        "telemetry",
-        "events_api_key",
-        config.telemetry.events_api_key,
-        redacted
-    );
-    enforce_val!(
-        "telemetry",
-        "mixpanel_enabled",
-        config.telemetry.mixpanel_enabled
-    );
-    enforce_str!(
-        "telemetry",
-        "mixpanel_token",
-        config.telemetry.mixpanel_token,
-        redacted
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_bucket",
-        config.endpoints.trace_upload_bucket
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_region",
-        config.endpoints.trace_upload_region
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials_file",
-        config.endpoints.trace_upload_credentials_file
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_endpoint_url",
-        config.endpoints.trace_upload_endpoint_url
-    );
-    enforce_str!(
-        "endpoints",
-        "trace_upload_credentials",
-        config.endpoints.trace_upload_credentials,
-        redacted
+    parsed.enforce_upload_and_telemetry(
+        &mut xai_grok_config::UploadTelemetryPins {
+            trace_upload_url: &mut config.endpoints.trace_upload_url,
+            feedback_base_url: &mut config.endpoints.feedback_base_url,
+            deployment_key: &mut config.endpoints.deployment_key,
+            events_url: &mut config.telemetry.events_url,
+            events_api_key: &mut config.telemetry.events_api_key,
+            mixpanel_enabled: &mut config.telemetry.mixpanel_enabled,
+            mixpanel_token: &mut config.telemetry.mixpanel_token,
+            trace_upload_bucket: &mut config.endpoints.trace_upload_bucket,
+            trace_upload_region: &mut config.endpoints.trace_upload_region,
+            trace_upload_credentials_file: &mut config.endpoints.trace_upload_credentials_file,
+            trace_upload_endpoint_url: &mut config.endpoints.trace_upload_endpoint_url,
+            trace_upload_credentials: &mut config.endpoints.trace_upload_credentials,
+        },
+        &mut push,
     );
     if let Some(val) = req.get("features").and_then(|f| f.get("codebase_indexing")) {
         use crate::agent::config::CodebaseIndexingSetting;

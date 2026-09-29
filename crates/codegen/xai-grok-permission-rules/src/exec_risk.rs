@@ -297,7 +297,7 @@ fn git_safe_query_verb_index(words: &[String]) -> Option<usize> {
     }
 }
 
-/// True when a `git` invocation carries an option from [`GIT_QUERY_UNSAFE_OPTIONS`] or `git grep`'s short-attached `-O<cmd>`, whatever the verb.
+/// True when a `git` invocation carries an option from `GIT_QUERY_UNSAFE_OPTIONS` or `git grep`'s short-attached `-O<cmd>`, whatever the verb.
 /// Used by [`git_words_are_read_only_query`] and on its own, so a session whitelist-prefix grant cannot override a driver/write flag.
 pub fn git_words_have_unsafe_query_option(words: &[String]) -> bool {
     if words.first().map(String::as_str) != Some("git") {

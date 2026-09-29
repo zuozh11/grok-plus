@@ -42,6 +42,7 @@ pub struct CacheResult<E> {
     pub etag: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct ModelsCacheManager<E> {
     pub path: std::path::PathBuf,
     pub ttl: std::time::Duration,

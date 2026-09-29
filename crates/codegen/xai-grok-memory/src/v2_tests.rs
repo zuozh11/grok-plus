@@ -189,7 +189,8 @@ fn compact_manifest_lists_titles_then_slugs_then_counts_the_rest() {
                 temp.path()
                     .join("topics")
                     .join(format!("topic-{index:04}.md")),
-                format!("# Topic number {index}\n\n{}", "d".repeat(400)),
+                // `z`/`q` are not hex, so a digest in the temp path cannot match the body check.
+                format!("# Topic number {index}\n\n{}", "zq".repeat(200)),
             )
             .unwrap();
         }
@@ -207,7 +208,7 @@ fn compact_manifest_lists_titles_then_slugs_then_counts_the_rest() {
     assert_eq!(manifest.discovered_entries, 200);
     assert_eq!(manifest.included_entries, 200);
     assert!(!manifest.is_truncated);
-    assert!(!manifest.content.contains("dddd"));
+    assert!(!manifest.content.contains("zqzqzq"));
     assert!(!manifest.content.contains("more topics are not listed"));
     let (titled, tail) = manifest.content.split_once("\n## More topics\n").unwrap();
     let titled_count = titled.matches("(`topics/topic-").count();
